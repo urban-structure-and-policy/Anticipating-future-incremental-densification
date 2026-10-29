@@ -1,0 +1,72 @@
+---
+title: "Master Pipeline Script data preparation 2013"
+output: html_document
+---
+
+```{r, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(rmarkdown)
+```
+
+## Set root directory
+
+```{r setup, include=FALSE}
+my_wd <- "project_dir"
+
+knitr::opts_knit$set(root.dir = normalizePath(my_wd))
+```
+
+# Preparation predictors 2013
+
+## 01. Parcel and location characteristics
+Description: Calculation of parcel charcteristics (area_par, peri_par, shp_par, share_area_foot_par, access_par, ucp_par) and characteristics of the location where the parcel is located (heritage_single, heritage_ensemble, mun_prop, service_quality, center_quality, HP_euro_qm, AR_euro_qm, styp_simple, bplan, brw)
+
+```{r, include=FALSE}
+render("./code/data_preparation_2013/01_parcels_variables.Rmd")
+```
+
+## 02. Calculate largest non-built-up area
+Description: Calculates largest non-built-up area of parcels. 
+
+```{r, include=FALSE}
+render("./code/data_preparation_2013/02_parcels_variables_long_calc.Rmd")
+```
+
+## 03. Land use and inhabitants
+Description: Calculation of parcel variables (use_code_par, use_name_par, use_cat_par, id_block, avg_age, only_over_75_dummy)
+
+```{r, include=FALSE}
+render("./code/data_preparation_2013/03_parcels_link_back_merged.Rmd")
+```
+
+## 04. Add bldg variables
+Description: We add building information to parcels.
+
+```{r, include=FALSE}
+render("./code/data_preparation_2013/04_add_building_infos.Rmd")
+```
+
+## 05. Add neighbour variables
+Description: We add neighbourhood information to parcels.
+
+```{r, include=FALSE}
+render("./code/data_preparation_2013/05_add_neighbour_infos.Rmd")
+```
+
+## 06. Prepare final dataset with predictors
+Description: Final dataset for modelling input is created. 
+
+```{r, include=FALSE}
+render("./code/data_preparation_2013/06_final_dataset_with_predictors.Rmd")
+```
+
+
+
+
+
+
+
+
+
+
+

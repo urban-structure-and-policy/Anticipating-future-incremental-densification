@@ -1,0 +1,352 @@
+---
+title: "Results model performance and shap"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+  word_document: default
+  pdf_document:
+    toc: true
+---
+
+```{r, include=FALSE}
+library(readr)
+library(sf)
+library(flextable)
+library(officer)
+library(tidyverse)
+library(kableExtra)
+library(scales)
+library(ggplot2)
+library(ggspatial) 
+library(shapviz)
+library(patchwork)
+```
+
+```{r setup, include=FALSE}
+my_wd_all_dat <- "project_dir"
+
+knitr::opts_knit$set(root.dir = normalizePath(my_wd_all_dat))
+```
+
+# Read data
+```{r, include=FALSE}
+# Model 1 performance
+bu_res_sfh_mp1 <- read_rds("./data_model_and_prediction_pipeline/m1_model_performance_bu_res_sfh.rds")
+bu_res_mfh_mp1 <- read_rds("./data_model_and_prediction_pipeline/m1_model_performance_bu_res_mfh.rds")
+bu_nonres_mp1 <- read_rds("./data_model_and_prediction_pipeline/m1_model_performance_bu_nonres.rds")
+nbu_mp1 <- read_rds("./data_model_and_prediction_pipeline/m1_model_performance_nbu.rds")
+
+# Model 2 performance
+bu_res_sfh_mp2 <- read_rds("./data_model_and_prediction_pipeline/m2_model_performance_bu_res_sfh.rds")
+bu_res_mfh_mp2 <- read_rds("./data_model_and_prediction_pipeline/m2_model_performance_bu_res_mfh.rds")
+bu_nonres_mp2 <- read_rds("./data_model_and_prediction_pipeline/m2_model_performance_bu_nonres.rds")
+nbu_mp2 <- read_rds("./data_model_and_prediction_pipeline/m2_model_performance_nbu.rds")
+
+# Predicted vs. observed plots M2
+bu_res_sfh_pred <- read_rds("./data_model_and_prediction_pipeline/m2_actual_vs_pred_bu_res_sfh.rds")
+bu_res_mfh_pred <- read_rds("./data_model_and_prediction_pipeline/m2_actual_vs_pred_bu_res_mfh.rds")
+bu_nonres_pred <- read_rds("./data_model_and_prediction_pipeline/m2_actual_vs_pred_bu_nonres.rds")
+nbu_pred <- read_rds("./data_model_and_prediction_pipeline/m2_actual_vs_pred_nbu.rds")
+
+# SHAP matrix M1
+bu_res_sfh_shap_matrix <- read_rds("./data_model_and_prediction_pipeline/m1_shap_matrix_bu_res_sfh.rds")
+bu_res_mfh_shap_matrix <- read_rds("./data_model_and_prediction_pipeline/m1_shap_matrix_bu_res_mfh.rds")
+bu_nonres_shap_matrix <- read_rds("./data_model_and_prediction_pipeline/m1_shap_matrix_bu_nonres.rds")
+nbu_shap_matrix <- read_rds("./data_model_and_prediction_pipeline/m1_shap_matrix_nbu.rds")
+
+# SHAP x dataframe M1
+bu_res_sfh_shap_df <- read_rds("./data_model_and_prediction_pipeline/m1_shap_x_dataframe_bu_res_sfh.rds")
+bu_res_mfh_shap_df <- read_rds("./data_model_and_prediction_pipeline/m1_shap_x_dataframe_bu_res_mfh.rds")
+bu_nonres_shap_df <- read_rds("./data_model_and_prediction_pipeline/m1_shap_x_dataframe_bu_nonres.rds")
+nbu_shap_df <- read_rds("./data_model_and_prediction_pipeline/m1_shap_x_dataframe_nbu.rds")
+
+# SHAP matrix M2
+bu_res_sfh_shap_matrix_m2 <- read_rds("./data_model_and_prediction_pipeline/m2_shap_matrix_bu_res_sfh.rds")
+bu_res_mfh_shap_matrix_m2 <- read_rds("./data_model_and_prediction_pipeline/m2_shap_matrix_bu_res_mfh.rds")
+bu_nonres_shap_matrix_m2 <- read_rds("./data_model_and_prediction_pipeline/m2_shap_matrix_bu_nonres.rds")
+nbu_shap_matrix_m2 <- read_rds("./data_model_and_prediction_pipeline/m2_shap_matrix_nbu.rds")
+
+# SHAP x dataframe M2
+bu_res_sfh_shap_df_m2 <- read_rds("./data_model_and_prediction_pipeline/m2_shap_x_dataframe_bu_res_sfh.rds")
+bu_res_mfh_shap_df_m2 <- read_rds("./data_model_and_prediction_pipeline/m2_shap_x_dataframe_bu_res_mfh.rds")
+bu_nonres_shap_df_m2 <- read_rds("./data_model_and_prediction_pipeline/m2_shap_x_dataframe_bu_nonres.rds")
+nbu_shap_df_m2 <- read_rds("./data_model_and_prediction_pipeline/m2_shap_x_dataframe_nbu.rds")
+
+# Variable names
+var_nam <- read_csv("./data_input/explanatroy_var.csv")
+```
+
+# Model performance
+
+## Model 1
+```{r}
+mp1 <- bu_res_sfh_mp1 %>% 
+  select(-Projection_Share, -Precision_at_Projection_Share, -Precision_at_Projection_Share_SD) %>% 
+  mutate(Model = "SFH parcels") %>% 
+  bind_rows(bu_res_mfh_mp1 %>% 
+  select(-Projection_Share, -Precision_at_Projection_Share, -Precision_at_Projection_Share_SD) %>% 
+  mutate(Model = "MFH parcels") ) %>% 
+  bind_rows(bu_nonres_mp1 %>% 
+              select(-Projection_Share, -Precision_at_Projection_Share, -Precision_at_Projection_Share_SD) %>% 
+  mutate(Model = "Non-residential parcels") ) %>% 
+  bind_rows(nbu_mp1 %>% 
+              select(-Projection_Share, -Precision_at_Projection_Share, -Precision_at_Projection_Share_SD) %>% 
+  mutate(Model = "Non-built-up parcels")) %>% 
+  mutate(across(where(is.numeric), ~ round(.x, 2))) 
+
+mp1_paps <- bu_res_sfh_mp1 %>% 
+  select(-Projection_Share, -Precision_at_Projection_Share_SD) %>% 
+  mutate(Model = "SFH parcels") %>% 
+  bind_rows(bu_res_mfh_mp1 %>% 
+  select(-Projection_Share, -Precision_at_Projection_Share_SD) %>% 
+  mutate(Model = "MFH parcels") ) %>% 
+  bind_rows(bu_nonres_mp1 %>% 
+              select(-Projection_Share, -Precision_at_Projection_Share_SD) %>% 
+  mutate(Model = "Non-residential parcels") ) %>% 
+  bind_rows(nbu_mp1 %>% 
+              select(-Projection_Share, -Precision_at_Projection_Share_SD) %>% 
+  mutate(Model = "Non-built-up parcels")) %>% 
+  mutate(across(where(is.numeric), ~ round(.x, 2))) 
+
+colnames(mp1) <- c("Model", "Bal. Accuracy", "Precision", "Recall", "F1", "ROC-AUC")
+```
+
+```{r}
+out_path <- "./output_maps/table_mp1.docx"
+
+if (file.exists(out_path)) {
+  file.remove(out_path)
+}
+
+ft <- flextable(mp1)
+
+ft <- ft %>%
+  font(fontname = "Calibri", part = "all") %>%
+  fontsize(size = 9, part = "all") %>%
+  width(width = 16 / ncol(mp1), unit = "cm") %>%   # distribute total width across columns
+  set_table_properties(layout = "fixed")
+
+doc <- read_docx() %>%
+  body_add_flextable(ft)
+
+print(doc, target = out_path)
+```
+
+## Model 2
+```{r}
+mp2 <- bu_res_sfh_mp2 %>% 
+  mutate(Model = "SFH parcels") %>% 
+  bind_rows(bu_res_mfh_mp2 %>% 
+  mutate(Model = "MFH parcels") ) %>% 
+  bind_rows(bu_nonres_mp2 %>% 
+  mutate(Model = "Non-residential parcels") ) %>% 
+  bind_rows(nbu_mp2 %>% 
+  mutate(Model = "Non-built-up parcels")) %>% 
+  mutate(across(where(is.numeric), ~ round(.x, 2))) %>% 
+  select(Model, R2..estimate, RMSE_orig..estimate, MAE_orig..estimate)
+
+colnames(mp2) <- c("Model", "R-squared", "RMSE", "MAE")
+
+```
+
+```{r}
+out_path <- "./output_maps/table_mp2.docx"
+
+if (file.exists(out_path)) {
+  file.remove(out_path)
+}
+
+ft <- flextable(mp2)
+
+ft <- ft %>%
+  font(fontname = "Calibri", part = "all") %>%
+  fontsize(size = 9, part = "all") %>%
+  width(width = 16 / ncol(mp2), unit = "cm") %>%   # distribute total width across columns
+  set_table_properties(layout = "fixed")
+
+doc <- read_docx() %>%
+  body_add_flextable(ft)
+
+print(doc, target = out_path)
+```
+
+# Predicted vs. observed plots
+```{r}
+pred_obs_plot <- bu_res_sfh_pred %>% 
+  transmute(predicted = .pred, observed = dep_var, model = "SFH parcels") %>% 
+  bind_rows(bu_res_mfh_pred %>% 
+  transmute(predicted = .pred, observed = dep_var, model = "MFH parcels")) %>% 
+    bind_rows(bu_nonres_pred %>% 
+  transmute(predicted = .pred, observed = dep_var, model = "Non-residential parcels")) %>% 
+    bind_rows(nbu_pred %>% 
+  transmute(predicted = .pred, observed = dep_var, model = "Non-built-up parcels")) 
+
+pred_obs_plot$model <- ordered(pred_obs_plot$model, 
+                                       levels = c("SFH parcels", "MFH parcels", "Non-residential parcels", "Non-built-up parcels"))
+```
+
+```{r, echo=FALSE, fig.width= 9, fig.height=3}
+plot_pred_obs <- ggplot(pred_obs_plot, aes(x = observed, y = predicted)) +
+  geom_point(alpha = 0.4, size = 1.2, colour = "#3b528b") +
+  geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed") +
+  labs(
+    x = "Actual values (log)",
+    y = "Predicted values",
+    title = "Predicted vs. observed"
+  ) +
+  theme_light() + 
+  facet_wrap(~model, scales = "free", nrow = 1)+
+  theme_minimal()
+
+plot_pred_obs
+
+ggsave(file="plot_pred_obs.svg", plot= plot_pred_obs, units = "mm",
+       device = "svg", path = "./output_maps/", width = 190, height = 60)
+```
+
+
+# SHAP
+
+## 1) SHAP Feature Importance as dataframe (mean |SHAP|)
+```{r}
+var_nam_short <- 
+  var_nam %>% 
+  select(var_name, var_names_paper)
+
+shap_imp <- tibble(
+  # feature = colnames(bu_res_sfh_shap_matrix),
+  # mean_abs_shap = colMeans(abs(bu_res_sfh_shap_matrix))
+    feature = colnames(bu_nonres_shap_matrix),
+  mean_abs_shap = colMeans(abs(bu_nonres_shap_matrix))
+) %>%
+  arrange(dplyr::desc(mean_abs_shap)) %>% 
+  left_join(var_nam %>% transmute(feature = var_name, 
+                                  var_names_paper)) %>% 
+  mutate(rank = row_number(), 
+         plot_subheader = paste0("SHAP FI: ", round(mean_abs_shap, 3), " (", rank, ")"))
+
+shap_imp %>% slice_head(n = 10)
+```
+
+## 2) Plots with shapviz
+
+### SHAPdependence plots for all models
+```{r}
+plot_shap_dependence_9by9 <- function(shap_matrix, shap_df, title_parceltype) {
+  
+  shap_imp <- tibble(feature = colnames(shap_matrix),
+                             mean_abs_shap = colMeans(abs(shap_matrix))) %>%
+    arrange(desc(mean_abs_shap)) %>%
+    left_join(var_nam %>% transmute(feature = var_name, var_names_paper),
+                     by = "feature") %>%
+    mutate(var_names_paper = coalesce(var_names_paper, feature)) %>% 
+    mutate(rank = row_number(), 
+         plot_subheader = paste0("SHAP FI: ", round(mean_abs_shap, 3), " (", rank, ")"))
+  
+  sv <- shapviz(shap_matrix, X = shap_df)
+  
+  shap_vals <- sv$S
+  max_abs <- max(abs(shap_vals), na.rm = TRUE)
+  ylim_global <- c(-max_abs, max_abs)
+  
+  top9 <- shap_imp %>% slice(1:9)
+  
+  plots <- lapply(seq_len(nrow(top9)), function(i) {
+    feat <- top9$feature[i]
+    nice <- top9$var_names_paper[i]
+    sub <- top9$plot_subheader[i]
+    
+    sv_dependence(sv,
+                  v = feat,
+                  color_var = NULL,
+                  alpha = 0.4) +
+      ggtitle(nice, sub) +
+      labs(x = "", y = "SHAP value") +
+      coord_cartesian(ylim = ylim_global) +
+      geom_hline(yintercept = 0, linetype = 'dotted', col = 'red') +
+      theme_minimal(base_size = 7)+
+      theme(
+      # plot.title  = element_text(size = 10),
+      # axis.title.x = element_text(size = 9),
+      # axis.title.y = element_text(size = 9),
+      axis.text   = element_text(size = 7)
+      # strip.text  = element_text(size = 8),   # if facets appear
+      # legend.title = element_text(size = 9),
+      # legend.text  = element_text(size = 8)
+    )
+  })
+
+  wrap_plots(plots, ncol = 3)   +
+  plot_annotation(
+    title = title_parceltype,
+    theme = theme(plot.title = element_text(size = 10))
+  )
+}
+```
+
+## 3) Plots Model 1
+
+```{r, echo=FALSE, fig.width= 9, fig.height=9}
+shap_dep_sfh <- plot_shap_dependence_9by9(bu_res_sfh_shap_matrix, bu_res_sfh_shap_df, "Model 1 - SFH parcels")
+shap_dep_mfh <- plot_shap_dependence_9by9(bu_res_mfh_shap_matrix, bu_res_mfh_shap_df, "Model 1 - MFH parcels")
+shap_dep_nonres <- plot_shap_dependence_9by9(bu_nonres_shap_matrix, bu_nonres_shap_df, "Model 1 - Non-residential parcels")
+shap_dep_nbu <- plot_shap_dependence_9by9(nbu_shap_matrix, nbu_shap_df, "Model 1 - Non-built-up parcels")
+
+shap_dep_sfh
+shap_dep_mfh
+shap_dep_nonres
+shap_dep_nbu
+
+ggsave(file="shap_dep_sfh.svg", plot= shap_dep_sfh, units = "mm",
+       device = "svg", path = "./output_maps/", width = 180, height = 180)
+ggsave(file="shap_dep_mfh.svg", plot= shap_dep_mfh, units = "mm",
+       device = "svg", path = "./output_maps/", width = 180, height = 180)
+ggsave(file="shap_dep_nonres.svg", plot= shap_dep_nonres, units = "mm",
+       device = "svg", path = "./output_maps/", width = 180, height = 180)
+ggsave(file="shap_dep_nbu.svg", plot= shap_dep_nbu, units = "mm",
+       device = "svg", path = "./output_maps/", width = 180, height = 180)
+
+ggsave(file="shap_dep_sfh.jpg", plot= shap_dep_sfh, units = "mm",
+       device = "jpg", path = "./output_maps/", width = 180, height = 180)
+ggsave(file="shap_dep_mfh.jpg", plot= shap_dep_mfh, units = "mm",
+       device = "jpg", path = "./output_maps/", width = 180, height = 180)
+ggsave(file="shap_dep_nonres.jpg", plot= shap_dep_nonres, units = "mm",
+       device = "jpg", path = "./output_maps/", width = 180, height = 180)
+ggsave(file="shap_dep_nbu.jpg", plot= shap_dep_nbu, units = "mm",
+       device = "jpg", path = "./output_maps/", width = 180, height = 180)
+```
+
+## 4) Plots Model 2
+
+```{r, echo=FALSE, fig.width= 9, fig.height=9}
+shap_dep_sfh <- plot_shap_dependence_9by9(bu_res_sfh_shap_matrix_m2, bu_res_sfh_shap_df_m2, "Model 2 - SFH parcels")
+shap_dep_mfh <- plot_shap_dependence_9by9(bu_res_mfh_shap_matrix_m2, bu_res_mfh_shap_df_m2, "Model 2 - MFH parcels")
+shap_dep_nonres <- plot_shap_dependence_9by9(bu_nonres_shap_matrix_m2, bu_nonres_shap_df_m2, "Model 2 - Non-residential parcels")
+shap_dep_nbu <- plot_shap_dependence_9by9(nbu_shap_matrix_m2, nbu_shap_df_m2, "Model 2 - Non-built-up parcels")
+
+shap_dep_sfh
+shap_dep_mfh
+shap_dep_nonres
+shap_dep_nbu
+
+ggsave(file="shap_dep_sfh_m2.svg", plot= shap_dep_sfh, units = "mm",
+       device = "svg", path = "./output_maps/", width = 180, height = 180)
+ggsave(file="shap_dep_mfh_m2.svg", plot= shap_dep_mfh, units = "mm",
+       device = "svg", path = "./output_maps/", width = 180, height = 180)
+ggsave(file="shap_dep_nonres_m2.svg", plot= shap_dep_nonres, units = "mm",
+       device = "svg", path = "./output_maps/", width = 180, height = 180)
+ggsave(file="shap_dep_nbu_m2.svg", plot= shap_dep_nbu, units = "mm",
+       device = "svg", path = "./output_maps/", width = 180, height = 180)
+
+ggsave(file="shap_dep_sfh_m2.jpg", plot= shap_dep_sfh, units = "mm",
+       device = "jpg", path = "./output_maps/", width = 180, height = 180)
+ggsave(file="shap_dep_mfh_m2.jpg", plot= shap_dep_mfh, units = "mm",
+       device = "jpg", path = "./output_maps/", width = 180, height = 180)
+ggsave(file="shap_dep_nonres_m2.jpg", plot= shap_dep_nonres, units = "mm",
+       device = "jpg", path = "./output_maps/", width = 180, height = 180)
+ggsave(file="shap_dep_nbu_m2.jpg", plot= shap_dep_nbu, units = "mm",
+       device = "jpg", path = "./output_maps/", width = 180, height = 180)
+```
+

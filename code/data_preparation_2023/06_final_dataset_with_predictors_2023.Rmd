@@ -1,0 +1,70 @@
+---
+title: "Create final dataset 2023"
+output:
+  word_document: default
+  pdf_document: default
+  html_document: default
+---
+
+```{r load packages, include=FALSE}
+library(tidyverse)
+library(sf)
+library(knitr)
+library(scales)
+library(readxl)
+```
+
+```{r setup, include=FALSE}
+my_wd_all_dat <- "project_dir"
+
+knitr::opts_knit$set(root.dir = normalizePath(my_wd_all_dat))
+```
+
+## Input data
+- prepared parcel data
+- administrative boundaries
+- population development in administrative boundaries
+
+```{r read data, include=FALSE, warning=FALSE}
+dat_raw <- st_read("./data_prep_output_2023/parcels_predictors_05_2023.gpkg") 
+```
+
+## Create final dataset
+- We exclude parcels with non-reliable information: 
+  * age of inhabitants is < 16 or 
+- We exclude the use category "unbenannte Straße/Weg", which we did not exclude in the beginning because some are part of a parcel which are merged together as a building overlaps.
+- We introduce a minimum parcel size of 100 m², as this is a realistic minimum size of a parcel for residential construction. 
+- We exclude all parcels with a shp_par (Shape index) larger 2.5, as these are largely splinter polygons or strangely combines parcels which is most likely due to errors in the base data. 
+
+```{r remove non-reliable information, include=FALSE}
+dat_01 <- dat_raw %>% 
+  filter(is.na(exclude_age)) %>% 
+  select(-exclude_age) %>% 
+  filter(use_name_par != "unbenannte Straße/Weg") %>%
+  filter(area_par >= 100) %>% 
+  filter(shp_par <= 2.5)
+```
+
+### Final dataset with sorted variables
+```{r}
+dat_fin <- dat_01 %>% 
+  mutate(only_75_older_par = if_else(only_75_older_par == 1, TRUE, FALSE),
+         under_16_present_par = if_else(under_16_present_par == 1, TRUE, FALSE)) %>% 
+  select(id_par_merge, parceltype, 
+         area_par, shp_par, share_area_foot_par, share_floorspace_par, largest_nonbuiltup, use_cat_par_simple,
+         fa_23, ucp_par, bldg_age_median, bldg_type,
+         heritage_single, heritage_ensemble, mun_prop, bplan, 
+         service_quality_2020, service_quality_chg, center_quality,
+         HP_euro_qm, AR_euro_qm, brw,
+         persons_total_par, persons_per_fa, ave_age_par, only_75_older_par, under_16_present_par,
+         share_area_par_nbr, share_floorspace_par_nbr, apd_400m, 
+         age_pop_mean_block, bldg_age_median_block, share_floorspace_par_block, 
+         structure_type, bezirk, bezirksteil)
+
+names(dat_fin)
+```
+
+## Write final dataset
+```{r write data, include=FALSE}
+st_write(dat_fin, "./data_prep_output_2023/parcels_predictors_06_2023_final.gpkg", delete_layer = TRUE)
+```

@@ -1,0 +1,422 @@
+---
+title: "Random Forest regression model"
+author: "Your Name"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+  word_document: default
+  pdf_document:
+    toc: true
+params:
+  run_id: "default"
+---
+
+```{r, include=FALSE}
+library(readr)
+library(sf)
+library(tidymodels)
+library(ranger)
+library(dplyr)
+library(spatialsample)
+library(waywiser)
+library(vip)
+library(themis)
+library(yardstick)
+library(important) 
+library(filtro)
+```
+
+```{r setup, include=FALSE}
+my_wd_all_dat <- "project_dir"
+
+knitr::opts_knit$set(root.dir = normalizePath(my_wd_all_dat))
+```
+
+```{r, include=FALSE}
+data_raw <- st_read("./data_prep_output/parcels_predictors_05_final.gpkg")
+```
+
+# Data preparation
+
+## Define model of interest
+
+```{r, echo=FALSE}
+# runs via 00_run_all
+cat("Selected model:", selected_model)
+```
+
+```{r echo=FALSE}
+dat <- data_raw %>% 
+    filter(dep_dens == "densification") %>%
+  filter(parceltype == selected_model)
+```
+
+## Load and Prepare Data
+
+```{r, include=FALSE}
+# remove variables which are not needed in the model
+base_drop <- c(
+  "dep_dens", "dep_dens_cat", "dep_fa_23", "dif_fa", "parceltype", "service_quality_chg", "service_quality_2020", "center_quality"
+)
+
+nbu_extra_drop <- c(
+  "dep_dens", "dep_dens_cat", "dif_fa_perc", "dep_fa_23", "parceltype",
+  "share_area_foot_par", "share_floorspace_par", "largest_nonbuiltup", "fa_13",
+  "bldg_flats_sum", "ucp_par", "bldg_age_median", "par_renov_recon", "bldg_type",
+  "persons_total_par", "persons_per_fa", "ave_age_par", "only_75_older_par",
+  "under_16_present_par", "share_area_par_nbr", "share_floorspace_par_nbr"
+)
+drop_cols <- if (params$run_id == "nbu") {
+  nbu_extra_drop
+} else {
+  base_drop
+}
+
+data_reg <- dat %>%
+  dplyr::select(-dplyr::any_of(drop_cols)) %>%   # any_of avoids errors if a col is missing
+  mutate(across(where(is.character), as.factor)) %>%
+  mutate(across(where(is.logical), as.factor))
+
+## conditional selection of dependent variabel (for nbu we need to select dif_fa instead of dif_fa_perc)
+if (params$run_id == "nbu") {
+  
+  data_reg <- data_reg %>%
+    mutate(dep_var = log(dif_fa)) %>%
+    select(-dif_fa)
+  
+} else {
+  
+data_reg <- data_reg %>%
+    mutate(dep_var = log(dif_fa_perc)) %>%
+    select(-dif_fa_perc)
+}
+
+# Check for missing values
+sum(is.na(data_reg))
+
+# Remove rows with missing values (if necessary)
+data <- na.omit(data_reg) 
+```
+
+## Preparations for tidymodel
+
+```{r}
+trainDat <- data
+
+predictor_names <- trainDat %>% 
+  st_drop_geometry() %>% 
+  select(id_par_merge, area_par:bezirksteil) %>% # id can be kept, as later on we define it as ID in the recipe
+  names()
+
+predictor_names
+
+response_name <- "dep_var"
+```
+
+### Define recipe including balancing of training data and tunable feature selection
+
+```{r define-recipe}
+formula <- as.formula(paste(
+  response_name,
+  "~",
+  paste(predictor_names, collapse = " + ")
+))
+
+recipe <- recipes::recipe(formula, data = trainDat) %>% 
+  update_role(id_par_merge, new_role = "ID") %>%
+  update_role(bezirksteil, new_role = "ID") %>%
+  update_role(bezirk, new_role = "ID") %>%
+  important::step_predictor_best(
+    all_predictors(),        
+    score      = "imp_rf",   
+    prop_terms = tune(),     
+    id         = "feat_sel"
+  )
+
+recipe
+```
+
+### Define model
+
+```{r define-model-spec}
+rf_model <- parsnip::rand_forest(mode = "regression") %>% 
+  set_engine("ranger", importance = "impurity")
+```
+
+### Create workflow
+
+```{r create-workflow}
+workflow <- workflows::workflow() %>% 
+  workflows::add_recipe(recipe) %>% 
+  workflows::add_model(rf_model)
+
+workflow
+```
+
+### Define spatial cross validation
+
+```{r define-cv}
+set.seed(123)
+block_folds <- spatialsample::spatial_block_cv(data, v = 4, n = 2)
+
+spatialsample::autoplot(block_folds)
+
+# control cross-validation
+keep_pred <- tune::control_resamples(save_pred = TRUE, save_workflow = TRUE)
+```
+
+### Define tuning grid for feature selection
+
+```{r tuning-grid}
+prop_grid <- tibble::tibble(
+    prop_terms = seq(0.5, 1.0, by = 0.1)  
+)
+prop_grid
+```
+
+### Tune model with spatial cross-validation
+
+```{r tune-model}
+set.seed(123)
+
+rf_tuned <- tune::tune_grid(
+  workflow,
+  resamples = block_folds,
+  grid      = prop_grid,
+  control   = keep_pred
+)
+
+rf_tuned
+```
+
+#### RMSE across tuning parameter values
+
+```{r roc-metrics}
+metrics_all <- tune::collect_metrics(rf_tuned)
+
+metrics_rmse <- metrics_all %>% 
+  dplyr::filter(.metric == "rmse") %>% 
+  dplyr::arrange(mean)
+
+metrics_rmse
+```
+
+```{r roc-metrics-table, results='asis'}
+knitr::kable(
+  metrics_rmse,
+  caption = "RMSE across different values of prop_terms (feature selection fraction).",
+  digits = 3
+)
+```
+
+```{r roc-metrics-plot, fig.width=6, fig.height=4}
+ggplot(metrics_rmse, aes(x = prop_terms, y = mean)) +
+  geom_line() +
+  geom_point() +
+  geom_errorbar(aes(ymin = mean - std_err, ymax = mean + std_err), width = 0.02) +
+  labs(
+    x = "Fraction of Predictors Kept (prop_terms)",
+    y = "Mean RMSE",
+    title = "RMSE vs. Feature Selection Fraction",
+    subtitle = "Error bars show +/- 1 standard error"
+  ) +
+  theme_minimal()
+```
+
+#### Overall metrics
+
+```{r collect-metrics}
+metrics_all
+```
+
+```{r fold-metrics}
+rf_tuned$.metrics  # metrics from each fold (list-column)
+```
+
+### Model performance
+
+#### Select best prop_terms by RMSE
+
+```{r}
+## Select best prop_terms by RMSE (lower is better)
+best_prop <- tune::select_best(rf_tuned, metric = "rmse")
+best_prop
+
+## Predictions for the best tuning configuration (across CV folds)
+preds <- tune::collect_predictions(rf_tuned, parameters = best_prop)
+preds
+```
+
+#### Regression metrics
+
+```{r}
+# RMSE
+rmse_best <- yardstick::rmse(
+  preds,
+  truth = dep_var,
+  estimate = .pred
+)
+
+# R²
+rsq_best <- yardstick::rsq(
+  preds,
+  truth = dep_var,
+  estimate = .pred
+)
+
+# MAE (Mean Absolute Error)
+mae_best <- yardstick::mae(
+  preds,
+  truth = dep_var,
+  estimate = .pred
+)
+cat("RMSE:", round(rmse_best$.estimate, 3), "\n")
+cat("R²:",   round(rsq_best$.estimate, 3), "\n")
+cat("MAE:",  round(mae_best$.estimate, 3), "\n")
+```
+
+#### Transform back from logarithmic scale
+
+```{r}
+# preds has columns: dep_var (log scale truth) and .pred (log scale prediction)
+
+preds_orig <- preds %>%
+  dplyr::mutate(
+    truth_orig = exp(dep_var),
+    pred_orig  = exp(.pred)
+  )
+
+mae_orig <- yardstick::mae(
+  preds_orig,
+  truth = truth_orig,
+  estimate = pred_orig
+)
+
+# Compute RMSE in original units
+rmse_orig <- yardstick::rmse(
+  preds_orig,
+  truth = truth_orig,
+  estimate = pred_orig
+)
+
+cat("MAE on original scale:", round(mae_orig$.estimate, 3), "\n")
+cat("RMSE on original scale:", round(rmse_orig$.estimate, 3), "\n")
+```
+
+#### Save as dataframe
+
+```{r}
+results_df <- data.frame(
+  Model = selected_model,
+  R2 = rsq_best,
+  RMSE = rmse_best,
+  MAE = mae_best,
+  RMSE_orig = rmse_orig,
+  MAE_orig = mae_orig
+)
+```
+
+#### Plot predicted vs. actual
+
+```{r}
+ggplot(preds, aes(x = dep_var, y = .pred)) +
+  geom_point(alpha = 0.4) +
+  geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed") +
+  labs(
+    x = "Actual values (dep_var)",
+    y = "Predicted values",
+    title = "Actual vs Predicted (spatial cv RF Regression)"
+  ) +
+  theme_minimal()
+```
+
+### Fit final model with tuned feature selection
+
+```{r fit-final-model}
+## Finalize workflow with best prop_terms
+final_wf <- finalize_workflow(workflow, best_prop)
+
+set.seed(123)
+
+rf_final <- final_wf %>%
+  fit(data = trainDat)
+
+rf_final
+```
+
+#### Feature importance for final model
+
+```{r feature-importance}
+imp <- extract_fit_parsnip(rf_final) %>%
+  vip::vip(num_features = 50)
+imp
+
+var_imp <- imp[["data"]]
+```
+
+#### Extract predictors finally used
+
+```{r}
+predictors_used <- var_imp %>% 
+  select(-Importance)
+
+predictors_used
+```
+
+## SHAP / Shapley values
+
+### 1) Get exact data used by the workflow
+
+```{r}
+set.seed(123)
+
+mold <- workflows::extract_mold(rf_final)
+X_all <- as.data.frame(mold$predictors)
+y_all <- mold$outcomes[[1]]
+
+# Engine model
+rf_fit <- workflows::extract_fit_engine(rf_final)
+
+# Prediction wrapper for regression
+pred_fun <- function(object, newdata) {
+  predict(object, data = newdata)$predictions
+}
+```
+
+### 2) Compute SHAP on subset
+
+```{r}
+set.seed(123)
+
+shap_mat <- fastshap::explain(
+  object       = rf_fit,
+  X            = X_all,
+  pred_wrapper = pred_fun,
+  nsim         = 100,
+  adjust       = TRUE
+)
+
+dim(shap_mat)
+```
+
+
+## Save output
+
+```{r}
+# variable importance
+write_rds(var_imp, paste0("./data_model_and_prediction_pipeline/m2_table_varimp_", selected_model, ".rds"))
+# predictors used
+write_rds(predictors_used, paste0("./data_model_and_prediction_pipeline/m2_predictors_used_", selected_model, ".rds"))
+# RF model
+write_rds(rf_final, paste0("./data_model_and_prediction_pipeline/m2_rf_model_", selected_model, ".rds"))
+# Model performance
+write_rds(results_df, paste0("./data_model_and_prediction_pipeline/m2_model_performance_", selected_model, ".rds"))
+# Prediction data for prediction vs. observed plots
+write_rds(preds, paste0("./data_model_and_prediction_pipeline/m2_actual_vs_pred_", selected_model, ".rds"))
+# SHAP matrix
+write_rds(shap_mat, paste0("./data_model_and_prediction_pipeline/m2_shap_matrix_", selected_model, ".rds"))
+# SHAP X data frame
+write_rds(X_all, paste0("./data_model_and_prediction_pipeline/m2_shap_x_dataframe_", selected_model, ".rds"))
+```

@@ -1,0 +1,386 @@
+---
+title: "Scenarios based on prediction"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+  word_document: default
+  pdf_document:
+    toc: true
+  params:
+  run_id: "default"
+---
+
+```{r, include=FALSE}
+library(readr)
+library(sf)
+library(dplyr)
+library(tidyverse)
+```
+
+```{r setup, include=FALSE}
+my_wd_all_dat <- "project_dir"
+
+knitr::opts_knit$set(root.dir = normalizePath(my_wd_all_dat))
+```
+
+## Load data
+
+```{r, include=FALSE}
+# Results prediction
+pred_bu_res_sfh <- st_read("./data_model_and_prediction_pipeline/m2_rf_prediction_23_results_bu_res_sfh.gpkg") %>% 
+  filter(parceltype == "bu_res_sfh")
+pred_bu_res_mfh <- st_read("./data_model_and_prediction_pipeline/m2_rf_prediction_23_results_bu_res_mfh.gpkg") %>% 
+  filter(parceltype == "bu_res_mfh")
+pred_bu_nonres <- st_read("./data_model_and_prediction_pipeline/m2_rf_prediction_23_results_bu_nonres.gpkg") %>% 
+  filter(parceltype == "bu_nonres")
+pred_nbu <- st_read("./data_model_and_prediction_pipeline/m2_rf_prediction_23_results_nbu.gpkg") %>% 
+  filter(parceltype == "nbu")
+
+# data 2013-2023
+data_raw_13 <- st_read("./data_prep_output/parcels_predictors_05_final.gpkg") 
+
+# data 2023
+data_raw <- st_read("./data_prep_output_2023/parcels_predictors_06_2023_final.gpkg") 
+
+# Geometry grid 500m
+grid_500_muc <- st_read("./data_input/ispire_grid/DE_Grid_ETRS89-UTM32_500m_muc_raw.gpkg")
+
+# Geometry city districts
+bezirke_geom <- st_read("./data_input/administrative_einheiten/stadtbezirke.gpkg")
+```
+
+## Scenarios of the results
+
+### Correction factor from actual densification 2013-2023
+We create three scenarios: 
+- base: Same share of development like 2013-2023 (share_dens_bs)
+- half: Half of the development (share_dens_hf)
+- double: double (share_dens_db)
+
+```{r}
+share_gesamtstadt <-
+  data_raw_13 %>%
+  st_drop_geometry() %>%
+  group_by(parceltype, dep_dens) %>%
+  summarise(n = n()) %>%
+  pivot_wider(names_from = dep_dens, values_from = n) %>%
+  mutate(share_dens_bs = densification / (nochange + densification),
+         bezirk = "Gesamtstadt") %>% 
+  mutate(share_dens_hf = share_dens_bs*0.5,
+         share_dens_db = share_dens_bs*2)
+```
+
+### Join prediction datasets from different parceltypes and add share of development
+
+```{r}
+pred_all <- pred_bu_res_sfh %>%
+  bind_rows(pred_bu_res_mfh) %>%
+  bind_rows(pred_bu_nonres) %>%
+  bind_rows(pred_nbu) %>%
+  select(
+    id_par_merge,
+    parceltype,
+    bezirk,
+    bezirksteil,
+    predicted,
+    prob_dens,
+    fa_23,
+    dif_fa_absolut_predicted
+  ) %>%
+  st_drop_geometry() %>%
+  left_join(
+    share_gesamtstadt %>%
+      st_drop_geometry() %>%
+      select(parceltype, share_dens_hf, share_dens_bs, share_dens_db)
+  )
+```
+
+### Derive parcels with top probability for development by parceltype
+
+```{r}
+slice_top_prob <- function(pred_all, scenariotype) {
+  pred_top_scenario <-
+    pred_all %>%
+    split(.$parceltype) %>%
+    map_dfr(function(df) {
+      prop_val <- df %>%
+        distinct({{scenariotype}}) %>%
+        pull()
+      
+      df %>%
+        arrange(desc(prob_dens)) %>%
+        slice_head(prop = prop_val)
+    }) %>%
+    mutate(base_scenario = TRUE)
+  
+  pred_top_scenario
+}
+```
+
+```{r}
+pred_top_bs <- slice_top_prob(pred_all, share_dens_bs) %>%
+  transmute(id_par_merge, bs_scenario = base_scenario)
+
+pred_top_hf <- slice_top_prob(pred_all, share_dens_hf) %>%
+  transmute(id_par_merge, hf_scenario = base_scenario)
+
+pred_top_db <- slice_top_prob(pred_all, share_dens_db) %>%
+  transmute(id_par_merge, db_scenario = base_scenario)
+```
+
+### Join data together and back to original dataset
+
+```{r}
+dat_scenarios_fin <- pred_all %>% 
+  left_join(pred_top_bs) %>% 
+  left_join(pred_top_hf) %>% 
+  left_join(pred_top_db) 
+```
+
+
+## Aggregate results to gridlevel (500m)
+### Join grid id to parcels
+
+```{r}
+grid_500_par <- st_filter(grid_500_muc, data_raw, .predicate = st_intersects) %>%
+  transmute(grid_id_500 = id)
+
+grid_500_par_sfh <- st_filter(grid_500_muc,
+                              data_raw %>% filter(parceltype == "bu_res_sfh"),
+                              .predicate = st_intersects) %>%
+  transmute(grid_id_500 = id)
+
+grid_500_par_mfh <- st_filter(grid_500_muc,
+                              data_raw %>% filter(parceltype == "bu_res_mfh"),
+                              .predicate = st_intersects) %>%
+  transmute(grid_id_500 = id)
+
+grid_500_par_nonres <- st_filter(grid_500_muc,
+                                 data_raw %>% filter(parceltype == "bu_nonres"),
+                                 .predicate = st_intersects) %>%
+  transmute(grid_id_500 = id)
+
+grid_500_par_nbu <- st_filter(grid_500_muc,
+                              data_raw %>% filter(parceltype == "nbu"),
+                              .predicate = st_intersects) %>%
+  transmute(grid_id_500 = id)
+
+centroids_results <- data_raw %>%
+  select(id_par_merge) %>%
+  left_join(dat_scenarios_fin %>% select(-c(
+    share_dens_hf, share_dens_bs, share_dens_db
+  ))) %>%
+  st_centroid()
+
+centroids_grid <- st_join(centroids_results, grid_500_par) %>%
+  st_drop_geometry()
+```
+
+### Function to aggregate results to any spatial level
+
+```{r}
+aggregate_results <- function(dat_scenarios_fin, scenariotype, aggregationlevel, all_parcels_2023) {
+  
+  # aggregate number and fa of all parcels in aggregationlevel (needed to later calculate relative change)
+  par_all <- all_parcels_2023 %>%
+    st_drop_geometry() %>%
+    group_by(parceltype, {{aggregationlevel}}) %>%
+    summarise(n_par_all = n(), fa_23_par_all = sum(fa_23)) %>%
+    bind_rows(
+      all_parcels_2023 %>%
+        st_drop_geometry() %>%
+        group_by({{aggregationlevel}}) %>%
+        summarise(n_par_all = n(), fa_23_par_all = sum(fa_23)) %>%
+        mutate(parceltype = "all")
+    ) %>%
+    mutate(fa_23_par_all = if_else(fa_23_par_all == 0, 1, fa_23_par_all)) #would lead to divided by 0
+  
+  # aggregate by aggregation level and parcel type
+  results_aggregated <- dat_scenarios_fin %>%
+    filter({{scenariotype}} == TRUE) %>%
+    group_by({{aggregationlevel}}, parceltype) %>%
+    summarise(
+      n_par = n(),
+      dif_fa = sum(dif_fa_absolut_predicted),
+      .groups = "drop" # makes sure that there is a zero, if no pacel occurs in a bezirk)
+    ) %>%
+    complete({{aggregationlevel}}, parceltype, fill = list(n_par = 0, dif_fa = 0))
+  
+  # aggregate by aggregation level and sum up all parcel types
+  results_all <- results_aggregated %>%
+    group_by({{aggregationlevel}}) %>%
+    summarise(n_par = sum(n_par), dif_fa = sum(dif_fa)) %>%
+    mutate(parceltype = "all")
+  
+  # join all and calculate relative change
+  results_join <- results_aggregated %>%
+    bind_rows(results_all) %>%
+    left_join(par_all) %>%
+    mutate(n_par_share = n_par / n_par_all,
+           dif_fa_share = dif_fa / fa_23_par_all)
+  
+  results_join
+}
+```
+
+### Run function for 500 m gridlevel
+
+```{r}
+# run function
+results_grid_bs_scenario <- aggregate_results(centroids_grid, bs_scenario, grid_id_500, centroids_grid) %>% 
+  mutate(scenario = "base")
+
+results_grid_hf_scenario <- aggregate_results(centroids_grid, hf_scenario, grid_id_500, centroids_grid) %>% 
+  mutate(scenario = "half")
+
+results_grid_db_scenario <- aggregate_results(centroids_grid, db_scenario, grid_id_500, centroids_grid) %>% 
+  mutate(scenario = "double")
+
+# Join results and add geometry
+results_all <- results_grid_bs_scenario %>%
+  bind_rows(results_grid_hf_scenario) %>%
+  bind_rows(results_grid_db_scenario)
+
+results_grid_all_scenarios <- grid_500_par %>% 
+  left_join(results_all)
+```
+
+## Aggregate results to city districts
+
+```{r}
+# run function
+results_bezirk_bs_scenario <- aggregate_results(dat_scenarios_fin, bs_scenario, bezirk, pred_all) %>% 
+  mutate(scenario = "base")
+
+results_bezirk_hf_scenario <- aggregate_results(dat_scenarios_fin, hf_scenario, bezirk, pred_all) %>% 
+  mutate(scenario = "half")
+
+results_bezirk_db_scenario <- aggregate_results(dat_scenarios_fin, db_scenario, bezirk, pred_all) %>% 
+  mutate(scenario = "double")
+
+# join all scenarios  and add geometry
+results_all <- results_bezirk_bs_scenario %>%
+  bind_rows(results_bezirk_hf_scenario) %>%
+  bind_rows(results_bezirk_db_scenario)
+
+results_bezirk_all_scenarios <- bezirke_geom %>% transmute(sb_nummer, bezirk = name) %>%
+  left_join(results_all)
+```
+
+## Write results
+
+```{r}
+export_par <- data_raw %>% 
+  left_join(dat_scenarios_fin %>% select(-c(share_dens_hf, share_dens_bs, share_dens_db)))
+```
+
+```{r}
+# results parcel-level
+st_write(
+  export_par,
+  "./data_model_and_prediction_pipeline/scenarios_parcellevel_all_parceltypes.gpkg",
+  delete_layer = TRUE
+)
+# results grid-level
+st_write(
+  results_grid_all_scenarios,
+  "./data_model_and_prediction_pipeline/scenarios_grid_500_all_parceltypes.gpkg",
+  delete_layer = TRUE
+)
+# results district-level
+st_write(
+  results_bezirk_all_scenarios,
+  "./data_model_and_prediction_pipeline/scenarios_districts_all_parceltypes.gpkg",
+  delete_layer = TRUE
+)
+```
+
+## Write results for QGIS maps
+
+```{r}
+## grey basemaps 500m grid
+
+st_write(
+  results_grid_all_scenarios %>% 
+    filter(scenario == "base"),
+  "./output_maps/map_500_base.gpkg",
+  delete_layer = TRUE
+)
+
+st_write(
+  grid_500_par,
+  "./output_maps/grid_500_par23.gpkg",
+  delete_layer = TRUE
+)
+
+st_write(
+  grid_500_par_sfh,
+  "./output_maps/grid_500_par23_sfh.gpkg",
+  delete_layer = TRUE
+)
+
+st_write(
+  grid_500_par_mfh,
+  "./output_maps/grid_500_par23_mfh.gpkg",
+  delete_layer = TRUE
+)
+
+st_write(
+  grid_500_par_nonres,
+  "./output_maps/grid_500_par23_nonres.gpkg",
+  delete_layer = TRUE
+)
+
+st_write(
+  grid_500_par_nbu,
+  "./output_maps/grid_500_par23_nbu.gpkg",
+  delete_layer = TRUE
+)
+
+
+## ODD on 500m grid
+
+st_write(
+  results_grid_all_scenarios %>% 
+  filter(scenario == "base" & dif_fa > 0 & parceltype == "all"),
+  "./output_maps/map_500_all.gpkg",
+  delete_layer = TRUE
+)
+
+st_write(
+  grid_500_par,
+  "./output_maps/grid_500_par23.gpkg",
+  delete_layer = TRUE
+)
+
+st_write(
+  results_grid_all_scenarios %>% 
+  filter(scenario == "base" & dif_fa > 0 & parceltype == "bu_res_sfh"),
+  "./output_maps/map_500_sfh.gpkg",
+  delete_layer = TRUE
+)
+
+st_write(
+  results_grid_all_scenarios %>% 
+  filter(scenario == "base" & dif_fa > 0 & parceltype == "bu_res_mfh"),
+  "./output_maps/map_500_mfh.gpkg",
+  delete_layer = TRUE
+)
+
+st_write(
+  results_grid_all_scenarios %>% 
+  filter(scenario == "base" & dif_fa > 0 & parceltype == "bu_nonres"),
+  "./output_maps/map_500_nonres.gpkg",
+  delete_layer = TRUE
+)
+
+st_write(
+  results_grid_all_scenarios %>% 
+  filter(scenario == "base" & dif_fa > 0 & parceltype == "nbu"),
+  "./output_maps/map_500_nbu.gpkg",
+  delete_layer = TRUE
+)
+```
+

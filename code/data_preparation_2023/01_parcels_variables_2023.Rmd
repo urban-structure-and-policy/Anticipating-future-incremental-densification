@@ -1,0 +1,452 @@
+---
+title: 'Predictors: Parcel and location characteristics'
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r, include=FALSE}
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(sf)
+library(lwgeom)
+library(ggplot2)
+```
+
+```{r setup, include=FALSE}
+my_wd_all_dat <- "project_dir"
+
+knitr::opts_knit$set(root.dir = normalizePath(my_wd_all_dat))
+```
+
+```{r start time, include=FALSE}
+start_time <- Sys.time()
+```
+
+## Predictors: Parcel and location characteristics 
+In this script we calculate parcel charcteristics (area_par, peri_par, shp_par, share_area_foot_par, access_par, ucp_par) and characteristics of the location where the parcel is located (heritage_single, heritage_ensemble, mun_prop, service_quality, center_quality, HP_euro_qm, AR_euro_qm, styp_simple, bplan, brw)
+
+## Input data
+- Pre-processed parcel dataset of 2023
+- Pre-processed building datasets 2023
+
+Additional data
+- Public transport quality 2020
+- Public transport quality 2040
+- Center quality 2020
+- Housing prices and rents in 1km² grid
+- Outline and year of zoningplans
+- Land reference values
+- Listed buildings 
+- Listed ensembles
+- Basic building dataset of 2023 to derive undergroud car parks
+- Basic parcel dataset to derive parcels in property of the city of munich
+
+```{r, include=FALSE}
+parcels_raw <- st_read("./data_prep_output_2023/parcels_04_final_data_2023.gpkg")
+bldg_23_raw <- st_read("./data_prep_output_2023/bldg_2023_04_cleaned_2021.gpkg")
+
+heritage_single <- st_read("./data_input/Denkmaldaten/Denkmaldaten_LHM_11-2024.gdb", layer = "DENK_BAUDENKM_POLY")
+heritage_ensemble <- st_read("./data_input/Denkmaldaten/Denkmaldaten_LHM_11-2024.gdb", layer = "DENK_BAUENSEMB_POLY")
+ucp <- st_read("./data_input/Gebaeude_VA/VAGRUND_GEBAEUDE_AKT_202312.shp")
+mun_prop <- st_read("./data_input/Flurstücke/VAGRUND_FLURSTUECKE_DFK_202403.shp")
+bplan <- st_read("./data_input/Bebauungspläne/BAUG_UMGRIFF_202312.shp")
+brw <- st_read("./data_input/Bodenrichtwerte/Bodenrichtwerte.gpkg", layer = "RICHTWERTE_2022")
+
+service_quality_2020 <- st_read("./data_input/OEPNV_Bedienqualitat/OEPNV_Bedienqualitaet.gdb", layer = "OEPNV_Bedienqualitaet_2020")
+service_quality_2040 <- st_read("./data_input/OEPNV_Bedienqualitat/OEPNV_Bedienqualitaet.gdb", layer = "OEPNV_Bedienqualitaet_2040")
+center_quality <- st_read("./data_input/Zentrenqualitaet/Zentrenqualitaet.gdb", layer = "Zentrenqualitaet_2020")
+prices <- st_read("./data_input/Preise_RWI/rwi_prices_2013_2023.gpkg", layer = "rwi_prices_2023")
+```
+
+## Data processing
+
+### Geometric charcteristics of parcels
+Calculates parcel size, perimeter of the parcel, building coverage and floorspace per parcel.
+
+```{r, include=FALSE}
+# Parcel size
+parcels <- parcels_raw %>% 
+  mutate(area_par = as.numeric(st_area(.)))
+
+# Shape index: perimeter / (sqrt(pi * area) * 2)
+parcels <- parcels %>%
+  mutate(peri_par = as.numeric(sf::st_perimeter(geom)),
+         shp_par = peri_par / (sqrt(pi * area_par) * 2))
+
+# building coverage
+overlap <- st_intersection(parcels, bldg_23_raw) %>% 
+  transmute(id_par_merge, 
+            overlap_area = as.numeric(st_area(.)), 
+            floors_bldg) %>% 
+  mutate(floor_area = overlap_area*floors_bldg) %>% 
+  st_drop_geometry() %>% 
+  group_by(id_par_merge) %>% 
+  summarise(overlap_area = sum(overlap_area), 
+            floor_area = sum(floor_area))
+  
+parcels <- parcels %>% 
+  left_join(overlap) %>% 
+  mutate(overlap_area = if_else(is.na(overlap_area), 0, overlap_area),
+         share_area_foot_par = overlap_area/area_par, 
+         share_floorspace_par = floor_area/area_par) %>% 
+  select(-overlap_area, -floor_area)
+```
+
+### Underground car park
+We check whether there is an underground building with use "Garage" existing. 
+
+```{r, include=FALSE}
+ucp <- ucp %>% 
+  filter(GESCHOSSE == -1 & NUTZUNGSAR == 2301) %>% # Filter auf Tiefgaragen
+  st_buffer(dist = -1,
+            endCapStyle = "SQUARE", 
+            joinStyle = "MITRE")
+
+parcels <- parcels %>%
+  mutate(ucp_par = lengths(st_intersects(parcels, ucp)) > 0)
+```
+
+### Heritage single assignment
+We check whether a listed building intersects the parcel. 
+
+```{r, include=FALSE}
+heritage_single <- heritage_single %>% 
+  st_buffer(dist = -1,
+            endCapStyle = "SQUARE", 
+            joinStyle = "MITRE")
+
+parcels <- parcels %>%
+  mutate(heritage_single = lengths(st_intersects(parcels, heritage_single)) > 0)
+```
+
+### Heritage ensemble assignment
+We check whether the parcel intersects an heritage ensemble (polygon). 
+
+```{r, include=FALSE}
+heritage_ensemble <- heritage_ensemble %>% 
+  st_buffer(dist = -1,
+            endCapStyle = "SQUARE", 
+            joinStyle = "MITRE")
+
+parcels <- parcels %>%
+  mutate(heritage_ensemble = lengths(st_intersects(parcels, heritage_ensemble)) > 0)
+```
+
+### Property of the city of munich
+We check whether the parcels intersects a parcel which is property of the city of Munich. 
+
+```{r, include=FALSE}
+mun_prop <- mun_prop %>% 
+  filter(EIGENTUMSA != 0) %>% 
+  st_buffer(dist = -1,
+            endCapStyle = "SQUARE", 
+            joinStyle = "MITRE")
+
+parcels <- parcels %>%
+  mutate(mun_prop = lengths(st_intersects(parcels, mun_prop)) > 0)
+```
+
+## Prepare data for intersection with additional layers
+For several other variables, we link the centroid of each parcel (point on surface) to the polygons of the respective input layer. The value of the linked polygon is added to the parcel.  
+
+```{r, include=FALSE}
+# Set CRS of parcels as reference
+reference_crs <- st_crs(parcels)
+
+# Transform CRS of service_quality, center_quality, and prices to the CRS of parcels
+service_quality_2020 <- st_transform(service_quality_2020, reference_crs)
+service_quality_2040 <- st_transform(service_quality_2040, reference_crs)
+center_quality <- st_transform(center_quality, reference_crs)
+prices <- st_transform(prices, reference_crs)
+bplan <- st_transform(bplan, reference_crs)
+# bplan_jahr <- st_transform(bplan_jahr, reference_crs)
+brw <- st_transform(brw, reference_crs)
+
+# Rename and prepare variables
+service_quality_2020 <- service_quality_2020 %>% rename(service_quality_2020 = KAT_DIST_G)
+service_quality_2040 <- service_quality_2040 %>% rename(service_quality_2040 = Kat_G)
+center_quality <- center_quality %>% rename(center_quality = KAT_DIST_G)
+prices <- prices %>% 
+  select(HP_euro_qm_zstd, AR_euro_qm_zstd) %>% 
+  rename(HP_euro_qm = HP_euro_qm_zstd,
+         AR_euro_qm = AR_euro_qm_zstd)
+
+bplan <- bplan %>% 
+  filter(EBENE == 72) %>%  #reduce to bplan in force
+  transmute(bplan = TRUE)
+bplan <- st_zm(bplan, drop = TRUE, what = "ZM")
+# bplan_jahr <- bplan_jahr %>% transmute(bplan_jahr = Satzu_J) %>%
+#   st_zm()
+brw <- brw %>% transmute(brw = BRW) %>% 
+  filter("NUTZUNG"  !=  'LW')
+
+# Point on Surface der Polygone in parcels_base berechnen
+parcels$label_point <- st_point_on_surface(parcels)
+```
+
+### Link service quality
+```{r, include=FALSE}
+# Check whether the point on surface lies within the polygons in service_quality
+intersects_service_quality_2020 <- st_intersects(parcels$label_point, service_quality_2020)
+intersects_service_quality_2040 <- st_intersects(parcels$label_point, service_quality_2040)
+
+# Add the ID of service_quality to parcels_base if the point on surface lies within the polygon
+parcels$service_quality_2020 <- sapply(intersects_service_quality_2020, function(x) {
+  if (length(x) > 0) {
+    return(service_quality_2020$service_quality_2020[x[1]])  # Takes the ID of the first matching polygon (if multiple)
+  } else {
+    return("F")  # If no match is found, insert service quality F
+  }
+})
+
+parcels$service_quality_2040 <- sapply(intersects_service_quality_2040, function(x) {
+  if (length(x) > 0) {
+    return(service_quality_2040$service_quality_2040[x[1]])  # Nimmt die ID des ersten (falls mehrere) übereinstimmenden Polygons
+  } else {
+    return("F")  # Wenn keine Übereinstimmung gefunden wird, Service-Qualität F einfügen
+  }
+})
+
+# Helper function: convert categorical values (A-F) to numeric values (1-6)
+service_level_num <- function(level) {
+  levels <- c("A", "B", "C", "D", "E", "F")
+  if (level %in% levels) {
+    return(7 - match(level, levels))  # 7 - position inverts the numbering
+  } else {
+    return(NA)
+  }
+}
+
+# Convert service quality to numeric values
+numeric_2020 <- sapply(parcels$service_quality_2020, service_level_num)
+numeric_2040 <- sapply(parcels$service_quality_2040, service_level_num)
+
+# Calculate change
+parcels$service_quality_chg <- numeric_2040 - numeric_2020
+```
+
+### Link center quality
+```{r, include=FALSE}
+# Check whether the point on surface lies within the polygons in center_quality
+intersects_center_quality <- st_intersects(parcels$label_point, center_quality)
+
+# Add the ID of center_quality to parcels_base if the point on surface lies within the polygon
+parcels$center_quality <- sapply(intersects_center_quality, function(x) {
+  if (length(x) > 0) {
+    return(center_quality$center_quality[x[1]])  # Takes the ID of the first matching polygon (if multiple)
+  } else {
+    return("F")  # If no match is found, insert center quality F
+  }
+})
+```
+
+### Link price variables
+```{r, include=FALSE}
+# Check whether the point on surface lies within the polygons in prices
+intersects_prices <- st_intersects(parcels$label_point, prices)
+
+# Add prices to parcels_base if the point on surface lies within the polygon
+parcels$HP_euro_qm <- sapply(intersects_prices, function(x) {
+  if (length(x) > 0) {
+    return(prices$HP_euro_qm[x[1]])
+  } else {
+    return(NA)
+  }
+})
+
+# Identify the indices of parcels with NA values
+na_indices <- which(is.na(parcels$HP_euro_qm))
+
+# Check if there are any NA values at all
+if (length(na_indices) > 0) {
+
+  # Go through each parcel with an NA value
+  for (i in na_indices) {
+    ## 1. Create a 500m buffer around the point of the current NA parcel
+    buffer_zone <- st_buffer(parcels$label_point$geom[i], dist = 1500)
+
+    ## 2. Find parcels whose points lie within the buffer
+    # We use st_intersects, which returns a list, and take the first element.
+    intersecting_indices_list <- st_intersects(buffer_zone, parcels$label_point$geom)
+
+    # Check if the list is not empty
+    if (length(intersecting_indices_list) > 0 && length(intersecting_indices_list[[1]]) > 0) {
+        intersecting_indices <- intersecting_indices_list[[1]]
+
+        ## 3. Exclude the current parcel itself
+        neighbour_indices <- setdiff(intersecting_indices, i)
+
+        ## 4. Calculate the mean of neighboring prices
+        if (length(neighbour_indices) > 0) {
+          neighbour_prices <- parcels$HP_euro_qm[neighbour_indices]
+
+          # Calculate the mean, ignoring any NAs among neighbors
+          mean_price <- mean(neighbour_prices, na.rm = TRUE)
+
+          ## 5. Assign the mean (only if it is not NaN – in case all neighbors are NA)
+          if (!is.nan(mean_price)) {
+            parcels$HP_euro_qm[i] <- mean_price
+          }
+        }
+    }
+  }
+}
+
+# Check the result
+summary(parcels$HP_euro_qm)
+sum(is.na(parcels$HP_euro_qm)) # Sollte jetzt 0 sein, es sei denn, einige Parzellen hatten keine Nachbarn mit Preisen
+
+# Add prices to parcels_base if the point on surface lies within the polygon
+parcels$AR_euro_qm <- sapply(intersects_prices, function(x) {
+  if (length(x) > 0) {
+    return(prices$AR_euro_qm[x[1]])
+  } else {
+    return(NA)
+  }
+})
+
+# Identify the indices of parcels with NA values
+na_indices <- which(is.na(parcels$AR_euro_qm))
+
+# Check if there are any NA values at all
+if (length(na_indices) > 0) {
+
+ # Go through each parcel with an NA value
+  for (i in na_indices) {
+    ## 1. Create a 500m buffer around the point of the current NA parcel
+    buffer_zone <- st_buffer(parcels$label_point$geom[i], dist = 1500)
+
+    ## 2. Find parcels whose points lie within the buffer
+    # We use st_intersects, which returns a list, and take the first element
+    intersecting_indices_list <- st_intersects(buffer_zone, parcels$label_point$geom)
+
+    # Check if the list is not empty
+    if (length(intersecting_indices_list) > 0 && length(intersecting_indices_list[[1]]) > 0) {
+        intersecting_indices <- intersecting_indices_list[[1]]
+
+        ## 3. Exclude the current parcel itself
+        neighbour_indices <- setdiff(intersecting_indices, i)
+
+        ## 4. Calculate the mean of neighboring prices
+        if (length(neighbour_indices) > 0) {
+          neighbour_prices <- parcels$AR_euro_qm[neighbour_indices]
+
+          # Calculate the mean, ignoring any NAs among neighbors
+          mean_price <- mean(neighbour_prices, na.rm = TRUE)
+
+          ## 5. Assign the mean (only if it is not NaN – in case all neighbors are NA)
+          if (!is.nan(mean_price)) {
+            parcels$AR_euro_qm[i] <- mean_price
+          }
+        }
+    }
+  }
+}
+
+# Check the result
+summary(parcels$AR_euro_qm)
+sum(is.na(parcels$AR_euro_qm)) # Should now be 0, unless some parcels had no neighbors with prices
+```
+
+### Link zoning plan 
+```{r, include=FALSE}
+# Check if the point on surface lies within the polygons in bplan
+intersects_bplan <- st_intersects(parcels$label_point, bplan)
+
+# Add the bplan ID to parcels_base if the point on surface lies within the polygon
+parcels$bplan <- sapply(intersects_bplan, function(x) {
+  if (length(x) > 0) {
+    return(bplan$bplan[x[1]])  # Take the ID of the first matching polygon (if multiple)
+  } else {
+    return(FALSE)  # If no match is found, insert FALSE
+  }
+})
+```
+
+### Link year of zoning plan
+```{r, include=FALSE}
+# # Check if the point on surface lies within the polygons in bplan_jahr
+# intersects_bplan_jahr <- st_intersects(parcels$label_point, bplan_jahr)
+# 
+# # Add the bplan_jahr ID to parcels_base if the point on surface lies within the polygon
+# parcels$bplan_jahr <- sapply(intersects_bplan_jahr, function(x) {
+#   if (length(x) > 0) {
+#     return(bplan_jahr$bplan_jahr[x[1]])  # Take the ID of the first matching polygon (if multiple)
+#   } else {
+#     return(FALSE)  # If no match is found, insert FALSE
+#   }
+# })
+```
+
+### Link BRW
+```{r, include=FALSE}
+# Check if the point on surface lies within the polygons in brw
+intersects_brw<- st_intersects(parcels$label_point, brw)
+
+# Add the BRW values to parcels_base if the point on surface lies within the polygon
+parcels$brw <- sapply(intersects_brw, function(x) {
+  if (length(x) > 0) {
+    return(brw$brw[x[1]])
+  } else {
+    return(NA)
+  }
+})
+
+# Identify the indices of parcels with NA values
+na_indices <- which(is.na(parcels$brw))
+
+# Check if there are any NA values at all
+if (length(na_indices) > 0) {
+
+  # Loop through each parcel with an NA value
+  for (i in na_indices) {
+    ## 1. Create a 1500m buffer around the point of the current NA parcel
+    buffer_zone <- st_buffer(parcels$label_point$geom[i], dist = 1500)
+
+    ## 2. Find parcels whose points lie within the buffer
+    # We use st_intersects, which returns a list, and take the first element
+    intersecting_indices_list <- st_intersects(buffer_zone, parcels$label_point$geom)
+
+    # Check if the list is not empty
+    if (length(intersecting_indices_list) > 0 && length(intersecting_indices_list[[1]]) > 0) {
+        intersecting_indices <- intersecting_indices_list[[1]]
+
+        ## 3. Exclude the current parcel itself
+        neighbour_indices <- setdiff(intersecting_indices, i)
+
+        ## 4. Calculate the average of neighbor values
+        if (length(neighbour_indices) > 0) {
+          neighbour_prices <- parcels$brw[neighbour_indices]
+
+          # Calculate the mean and ignore any NAs among the neighbors
+          mean_price <- mean(neighbour_prices, na.rm = TRUE)
+
+          # 5. Assign the mean value (only if it is not NaN – in case all neighbors are NA)
+          if (!is.nan(mean_price)) {
+            parcels$brw[i] <- mean_price
+          }
+        }
+    }
+  }
+}
+```
+
+
+## Reduce datset and write output
+```{r, include=FALSE}
+parcels_reduced <- parcels %>%
+  select(-label_point)
+```
+
+```{r, include=FALSE}
+st_write(parcels_reduced, "./data_prep_output_2023/parcels_predictors_01_2023.gpkg", delete_layer = TRUE)
+```
+
+```{r end-time, echo=FALSE}
+end_time <- Sys.time()
+duration <- end_time - start_time
+message("⏱️ Knitting completed in ", round(duration, 2), " ", attr(duration, "units"))
+```
+

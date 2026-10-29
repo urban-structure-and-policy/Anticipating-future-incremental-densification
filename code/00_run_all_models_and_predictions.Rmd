@@ -1,0 +1,111 @@
+---
+title: "Run all models and predictions"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+  word_document: default
+  pdf_document:
+    toc: true
+---
+
+```{r, include=FALSE}
+library(tidyverse)
+library(rmarkdown)
+```
+
+```{r setup, include=FALSE}
+my_wd <- "project_dir"
+
+knitr::opts_knit$set(root.dir = normalizePath(my_wd))
+```
+
+# 01-04. Run model and prediction scripts 
+Description: Runs random forest classification model (stage 1) and regression model (stage 2) based on observed densification 2013-2023. Predicts densification based on parcel data 2023.
+
+## Function for running script 1-4
+The function runs the modelling/prediction steps for all four parcel types and knits the respective html documents. 
+
+```{r}
+run_model_pipeline <- function(models,
+                               base_path = paste0(my_wd, "/code/models_and_predictions")) {
+  
+  rmd_files <- c(
+    "01_rf_classification_model.Rmd",
+    "02_rf_regression_model.Rmd",
+    "03_rf_classification_prediction.Rmd",
+    "04_rf_regression_prediction.Rmd"
+  )
+  
+  for (selected_model in models) {
+    
+    message("==== Running pipeline for: ", selected_model, " ====")
+    
+    for (rmd in rmd_files) {
+      
+      input_file <- file.path(base_path, rmd)
+      
+      output_file <- paste0(
+        tools::file_path_sans_ext(rmd),
+        "_", selected_model,
+        ".html"
+      )
+      
+      message("Rendering: ", rmd)
+      
+      render(
+        input = input_file,
+        params = list(run_id = selected_model),
+        output_file = output_file,
+        envir = new.env() 
+      )
+    }
+    
+    message("==== Finished: ", selected_model, " ====\n")
+  }
+}
+```
+
+## Run function for all parceltypes
+
+```{r}
+# all parcel types
+models <- c(
+  "bu_nonres",
+  "bu_res_sfh",
+  "bu_res_mfh",
+  "nbu"
+)
+
+run_model_pipeline(models)
+```
+
+## 05. Results model performance and shap
+Description: Summarises all model performance metrics of the former steps and produces SHAP plots. 
+
+```{r, include=FALSE}
+render("./code/models_and_predictions/05_results_model_performance_and_shap.Rmd")
+```
+
+## 06. Derive base scenario
+Description: Base scenario is derived based on share of observed densification. Results are aggregated to a 500 m grid. 
+
+```{r, include=FALSE}
+render("./code/models_and_predictions/06_derive_scenarios.Rmd")
+```
+
+## 07. Results base scenario
+Description: Outputs a summary table of observed densification and predicted densification in the base scenario. 
+
+```{r, include=FALSE}
+render("./code/models_and_predictions/07_results_base_scenario.Rmd")
+```
+
+
+
+
+
+
+
+

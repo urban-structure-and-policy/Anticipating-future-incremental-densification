@@ -1,0 +1,119 @@
+---
+title: "Random Forest classification prediction"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+  word_document: default
+  pdf_document:
+    toc: true
+params:
+  run_id: "default"
+---
+
+```{r, include=FALSE}
+library(readr)
+library(sf)
+library(tidymodels)
+library(ranger)
+library(dplyr)
+library(spatialsample)
+library(waywiser)
+library(vip)
+library(themis)
+library(yardstick)
+```
+
+```{r setup, include=FALSE}
+my_wd_all_dat <- "project_dir"
+
+knitr::opts_knit$set(root.dir = normalizePath(my_wd_all_dat))
+```
+
+## Define model of interest
+
+```{r, echo=FALSE}
+# runs via 00_run_all
+cat("Selected model:", selected_model)
+```
+
+## Load data
+
+```{r, include=FALSE}
+data_raw <- st_read("./data_prep_output_2023/parcels_predictors_06_2023_final.gpkg") 
+
+rf_model <- read_rds(paste0("./data_model_and_prediction_pipeline/m1_rf_model_", selected_model, ".rds"))
+```
+
+## Data perparation
+
+```{r, include=FALSE}
+# Reduce data to model of interest
+dat <- data_raw %>% 
+  filter(parceltype == selected_model) %>%
+  rename(fa_13 = fa_23)
+
+# remove variables which are not needed in the model
+base_drop <- c(
+  "parceltype", "service_quality_chg", "service_quality_2020", "center_quality"
+)
+
+nbu_extra_drop <- c(
+  "parceltype",
+  "share_area_foot_par", "share_floorspace_par", "largest_nonbuiltup", "fa_13",
+  "bldg_flats_sum", "ucp_par", "bldg_age_median", "par_renov_recon", "bldg_type",
+  "persons_total_par", "persons_per_fa", "ave_age_par", "only_75_older_par",
+  "under_16_present_par", "share_area_par_nbr", "share_floorspace_par_nbr"
+)
+
+drop_cols <- if (params$run_id == "nbu") {
+  nbu_extra_drop
+} else {
+  base_drop
+}
+
+# drop_cols <- if (selected_model == "nbu") {
+#   nbu_extra_drop
+# } else {
+#   base_drop
+# }
+
+data_reg <- dat %>%
+  dplyr::select(-dplyr::any_of(drop_cols)) %>%
+  mutate(across(where(is.character), as.factor)) %>%
+  mutate(across(where(is.logical), as.factor))
+
+# Check for missing values
+sum(is.na(data_reg))
+
+# Remove rows with missing values (if necessary)
+data <- na.omit(data_reg)
+```
+
+## Predict on all data 2023
+
+```{r, echo=FALSE}
+pred_class <- predict(rf_model, data)
+pred_prob <- predict(rf_model, data, type = "prob") 
+
+data_fin <- data %>%
+  cbind(pred_prob) %>% 
+  cbind(pred_class) %>% 
+  transmute(id_par_merge, bezirk,
+            predicted = .pred_class,
+            prob_dens = .pred_densification)
+
+results_pred <- data_fin %>% 
+  st_drop_geometry() %>% 
+  group_by(predicted) %>% 
+  summarise(n = n())
+
+results_pred
+```
+
+## write result
+
+```{r, include=FALSE}
+st_write(data_fin, paste0("./data_model_and_prediction_pipeline/m1_rf_prediction_23_results_", selected_model, ".gpkg"), delete_layer = TRUE)
+```

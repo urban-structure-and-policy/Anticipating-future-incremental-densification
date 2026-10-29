@@ -1,0 +1,217 @@
+---
+title: "Add bldg variables"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r, include=FALSE}
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(sf)
+library(lwgeom)
+library(ggplot2)
+library(readr)
+```
+
+```{r setup, include=FALSE}
+my_wd_all_dat <- "project_dir"
+
+knitr::opts_knit$set(root.dir = normalizePath(my_wd_all_dat))
+```
+
+```{r start time, include=FALSE}
+start_time <- Sys.time()
+```
+
+## Add bldg variables
+We add building information to parcels. Some of the additional information is available for the original buildings. Therefore, link via spatial query.
+
+## Input data
+- Pre-processed parcel data set of 2013
+- Pre-processed building data set of 2013 and 2023
+- Basic building datasets of 2011, 2013 and 2023
+- Building age for buildings 2011, 2013
+
+```{r, include=FALSE}
+parcels_raw <- st_read("./data_prep_output/parcels_predictors_03.gpkg")
+
+bldg_13 <- st_read("./data_prep_output/bldg_2013_05_cleaned_2010_par_id_bldg_type.gpkg")
+
+# Additional information for buildings 2013 must be further processed using the base dataset
+bldg_13_base_raw <- st_read("./data_prep_output/bldg_2013_01_base.gpkg")
+bldg_age_13_raw <- st_read("./data_input/Baualter_letzte_Bautaetigkeit/Baujahr_Gebaeude.gpkg", layer = "GEBAEUDE_AKT_201312_Baujahr") %>% 
+  st_drop_geometry()
+
+# Additional information for buildings 2011 must be further processed using the base dataset
+bldg_11_base_raw <- st_read("./data_prep_output/bldg_2011_01_base.gpkg")
+bldg_age_11_raw <- st_read("./data_input/Baualter_letzte_Bautaetigkeit/Baujahr_Gebaeude.gpkg", layer = "GEBAEUDE_AKT_201103_Baujahr") %>% 
+  st_drop_geometry()
+
+# Additional information for buildings 2023 must be further processed using the base dataset
+bldg_23_base_raw <- st_read("./data_prep_output/bldg_2023_01_base.gpkg")
+```
+
+## Data processing
+
+### Linking additional information of buildings to basic building layer
+- We exclude buildings 2013 which are labled as NUUTZUNGSAR == 3001 (vollzogener Abbruch) from the dataset 2013 in order to get the building age of 2011 instead which is most of the time correct (see issue #13).
+- bldg_age_13_raw: For the building age we use the variable G31_Max_Close which is the age of the nearest building to the point with the age information, if no point directly intersects the building. This can lead to errors in single cases, but generally reduces the number of NA values. 
+
+```{r, include=FALSE}
+## combine age and flats
+bldg_13_add_info <- bldg_13_base_raw %>% 
+  filter(use_code_bldg != 3101) %>% 
+  transmute(id_bldg) %>% 
+  left_join(bldg_age_13_raw %>% 
+              transmute(id_bldg = GEBID, bldg_age = G31_Max_Close)) 
+
+bldg_11_add_info <- bldg_11_base_raw %>% 
+  transmute(id_bldg) %>% 
+  left_join(bldg_age_11_raw %>% transmute(id_bldg = GEBID, bldg_age = G31_Max_Close)) 
+
+bldg_23_add_info <- bldg_23_base_raw %>% 
+  transmute(id_bldg) 
+```
+
+### Prepare data for spatial intersection
+```{r, include=FALSE}
+# Set the CRS of bldg_13 as reference
+reference_crs <- st_crs(bldg_13)
+
+# Transform the CRS of parcels to the CRS of bldg_13
+parcels <- st_transform(parcels_raw, reference_crs)
+bldg_13_add_info <- st_transform(bldg_13_add_info, reference_crs)
+bldg_11_add_info <- st_transform(bldg_11_add_info, reference_crs)
+bldg_23_add_info <- st_transform(bldg_23_add_info, reference_crs)
+
+# Rename and prepare variables
+parcels <- parcels %>% transmute(id_par_merge)
+
+# Calculate point on surface of the polygons in bldg_13_base
+bldg_13_add_info$label_point <- st_point_on_surface(bldg_13_add_info)
+bldg_11_add_info$label_point <- st_point_on_surface(bldg_11_add_info)
+bldg_23_add_info$label_point <- st_point_on_surface(bldg_23_add_info)
+```
+
+### Add parcel id to bldg_13_add_info
+We add the id_par_merge also to the additional info, as we combine the data on the parcel level. 
+
+```{r, include=FALSE}
+# Check whether the point on surface lies within the polygons in parcels
+intersects_parcels <- st_intersects(bldg_13_add_info$label_point, parcels)
+
+# Add the ID of parcels to bldg_add_info_base if the point on surface lies within the polygon
+bldg_13_add_info$id_par_merge <- sapply(intersects_parcels, function(x) {
+  if (length(x) > 0) {
+    return(parcels$id_par_merge[x[1]])  # Takes the ID of the first matching polygon (if multiple)
+  } else {
+    return("F")  # If no match is found, insert service quality F
+  }
+})
+```
+
+### Add parcel id to bldg_11_add_info
+We add the id_par_merge also to the additional info, as we combine the data on the parcel level. 
+
+```{r, include=FALSE}
+# Check whether the point on surface lies within the polygons in parcels
+intersects_parcels <- st_intersects(bldg_11_add_info$label_point, parcels)
+
+# Add the ID of parcels to bldg_add_info_base if the point on surface lies within the polygon
+bldg_11_add_info$id_par_merge <- sapply(intersects_parcels, function(x) {
+  if (length(x) > 0) {
+    return(parcels$id_par_merge[x[1]])  # Takes the ID of the first matching polygon (if multiple)
+  } else {
+    return("F")  # If no match is found, insert service quality F
+  }
+})
+```
+
+### Add parcel id to bldg_23_add_info
+We add the id_par_merge also to the additional info, as we combine the data on the parcel level. 
+
+```{r, include=FALSE}
+# Check whether the point on surface lies within the polygons in parcels
+intersects_parcels <- st_intersects(bldg_23_add_info$label_point, parcels)
+
+# Add the ID of parcels to bldg_add_info_base if the point on surface lies within the polygon
+bldg_23_add_info$id_par_merge <- sapply(intersects_parcels, function(x) {
+  if (length(x) > 0) {
+    return(parcels$id_par_merge[x[1]])  # Takes the ID of the first matching polygon (if multiple)
+  } else {
+    return("F")  # If no match is found, insert service quality F
+  }
+})
+```
+
+### Aggregate information on the parcel level
+- For building footprint size and number of floors we derive the median per parcel. 
+- For building age we calculate mean and median. 
+
+```{r, include=FALSE}
+bldg_13_var <- bldg_13 %>% 
+  st_drop_geometry() %>% 
+  group_by(id_par_merge) %>% 
+  summarise(n_bldg = n(),
+            area_foot_bldg_median = median(area_foot_bldg, na.rm = TRUE), 
+            floors_bldg_median = median(floors_bldg, na.rm = TRUE)) %>% 
+  mutate(n_bldg = if_else(is.na(area_foot_bldg_median), 0, n_bldg))
+
+bldg_13_add_info_var <- bldg_13_add_info %>% 
+  st_drop_geometry() %>% 
+  group_by(id_par_merge) %>% 
+  summarise(bldg_age_mean = mean(bldg_age, na.rm = TRUE), 
+           bldg_age_median = median(bldg_age, na.rm = TRUE))
+
+bldg_11_add_info_var <- bldg_11_add_info %>% 
+  st_drop_geometry() %>% 
+  group_by(id_par_merge) %>% 
+  summarise(bldg_age_mean = mean(bldg_age, na.rm = TRUE), 
+           bldg_age_median = median(bldg_age, na.rm = TRUE))
+```
+
+### Join information back to parcels
+We join the datasets of 2011 and 2013. If there is a value for the parcel in 2013, we take this one. If there is not, we take the value for 2011. 
+
+```{r, include=FALSE}
+# Add column "Year"
+bldg_11_add_info_var$Jahr <- 2011
+bldg_13_add_info_var$Jahr <- 2013
+
+# Combine both tables
+bldg_add_info_var <- rbind(bldg_11_add_info_var, bldg_13_add_info_var)
+
+bldg_add_info_var <- bldg_add_info_var %>%
+  arrange(id_par_merge, desc(Jahr)) %>%  # Prioritize 2013
+  group_by(id_par_merge) %>%
+  slice(1) %>%
+  ungroup()
+
+parcels_fin <- parcels_raw %>% 
+  left_join(bldg_13_var) %>% 
+  left_join(bldg_add_info_var)
+```
+
+```{r, include=FALSE}
+parcels_fin <- parcels_fin %>%
+  mutate(n_bldg = if_else(is.na(n_bldg), 0, n_bldg), 
+         persons_per_fa = persons_total_par/fa_13, 
+         bldg_age_mean = if_else(bldg_age_mean < 1850, 1850, bldg_age_mean),
+         bldg_age_median = if_else(bldg_age_median < 1850, 1850, bldg_age_median))
+```
+
+## Output
+```{r, include=FALSE}
+st_write(parcels_fin, "./data_prep_output/parcels_predictors_04.gpkg", delete_layer = TRUE)
+```
+
+```{r end-time, echo=FALSE}
+end_time <- Sys.time()
+duration <- end_time - start_time
+message("Knitting completed in ", round(duration, 2), " ", attr(duration, "units"))
+```
+
+
+

@@ -1,0 +1,199 @@
+---
+title: 'Predictors: Socio-demographic characteristics of residents'
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r, include=FALSE}
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(sf)
+library(lwgeom)
+library(ggplot2)
+library(readr)
+```
+
+```{r setup, include=FALSE}
+my_wd_all_dat <- "project_dir"
+
+knitr::opts_knit$set(root.dir = normalizePath(my_wd_all_dat))
+```
+
+```{r start time, include=FALSE}
+start_time <- Sys.time()
+```
+
+## Predictors: Socio-demographic characteristics of residents
+- Some input data comes linked to the original parcel dataset, where the parcels are not merged. Thus, the variables must be assigned via the original data set. Therefore, we use the linking dataset to aggregate the information to the merged parcels. 
+- In the end of the script we join all predictor variables calculated so far together. 
+
+## Input data
+- Pre-processed parcel dataset of 2013
+- Basic parcel dataset 2013
+- Linking dataset basic parcels - merged parcels
+
+Additional input
+- Information on inhabitants 2010 and 2013
+
+Results from prior steps which are all joined here
+- Pre-processed parcel dataset with geometric and location information
+- Pre-processed parcel dataset with largest non-built-up area
+
+```{r, include=FALSE}
+## Parcel datasets
+parcels_raw <- st_read("./data_prep_output/parcels_06_final_data_observed_densification.gpkg") 
+zuordnung_13_11 <- read_rds("./data_prep_output/link_parcels_03_merged_2013_2011.rds") 
+parcels_base_raw <- st_read("./data_prep_output/parcels_01_base.gpkg") 
+
+## Input new variables
+par_inhabitants_2010 <- read.csv("./data_input/Bevölkerung/Bevölkerung/FLURSTUECKE13_EWO10.csv", sep=";")
+par_inhabitants_2013 <- read.csv("./data_input/Bevölkerung/Bevölkerung/FLURSTUECKE13_EWO13.csv", sep=";")
+
+## Results from earlier calculation steps
+parcels_geom <- read_sf("./data_prep_output/parcels_predictors_01.gpkg") 
+parcels_largest_nbu <- read_sf("./data_prep_output/parcels_predictors_02.gpkg") %>% 
+  st_drop_geometry() 
+```
+
+## Prepare and join inhabitants
+- The inhabitant data set is created for the original plots. Therefore, the figures for merged plots must be aggregated.
+- As we inserted buildings of 2011 in the 2013 dataset, for these parcels we need to include information on inhabitant from the respective year. 
+- The age of the inhabitants is provided in age groups. 
+- ave_age_par: To calculate the average age per parcel, we use the mean age in each group (e.g. 10-15 = 12.5). 
+- persons_total_par: To calculate the total number of persons per parcel, we sum up the number of persons in all age groups.
+- only_75_older_par: Is a TRUE/FALSE variable which is TRUE if there are only persons of the 75 and older present.
+- under_16_present_par: TRUE if there is a person under 16 present. 
+
+```{r, include=FALSE}
+# Add column "year"
+par_inhabitants_2010$Jahr <- 2010
+par_inhabitants_2013$Jahr <- 2013
+
+# Merge both tables
+par_inhabitants <- rbind(par_inhabitants_2010, par_inhabitants_2013)
+
+par_inhabitants_joined <- zuordnung_13_11 %>%
+  left_join(par_inhabitants %>% mutate(id_par = FLSTNR) %>% select(-FLSTNR))
+
+par_inhabitants_joined$Join_Count <- NULL
+
+par_inhabitants_sum <- par_inhabitants_joined %>%
+  group_by(id_par_merge, Jahr) %>%
+  summarise(across(where(is.numeric), ~ sum(.x, na.rm = TRUE))) %>%
+  filter(EN14 != 0)
+
+par_inhabitants_sum <- par_inhabitants_sum %>%
+  arrange(id_par_merge, desc(Jahr)) %>%  # # Prioritize 2013
+  group_by(id_par_merge) %>%
+  slice(1) %>%
+  ungroup()
+
+# Convert from wide to long format: EN1 to EN14 are transformed into two columns: "Variable" and "Value"
+par_inhabitants_sum_long <- pivot_longer(
+  par_inhabitants_sum,
+  cols = starts_with("EN"),
+  names_to = "age_classes_code",
+  values_to = "persons"
+)
+
+# Rename age classes and add age_mean
+age_classes_labels <- c(
+  EN1 = "0 to 2", EN2 = "3 to 5", EN3 = "6 to 9", EN4 = "10 to 15", EN5 = "16 to 18",
+  EN6 = "19 to 20", EN7 = "21 to 24", EN8 = "25 to 29", EN9 = "30 to 44", EN10 = "45 to 59",
+  EN11 = "60 to 64", EN12 = "65 to 74", EN13 = "75 and older", EN14 = "total"
+)
+
+par_inhabitants_sum_long <- par_inhabitants_sum_long %>%
+  mutate(age_classes = age_classes_labels[age_classes_code]) %>%
+  mutate(age_mean = case_when(
+    age_classes == "0 to 2" ~ 1,
+    age_classes == "3 to 5" ~ 4,
+    age_classes == "6 to 9" ~ 7.5,
+    age_classes == "10 to 15" ~ 12.5,
+    age_classes == "16 to 18" ~ 17,
+    age_classes == "19 to 20" ~ 19.5,
+    age_classes == "21 to 24" ~ 22.5,
+    age_classes == "25 to 29" ~ 27,
+    age_classes == "30 to 44" ~ 37,
+    age_classes == "45 to 59" ~ 52,
+    age_classes == "60 to 64" ~ 62,
+    age_classes == "65 to 74" ~ 69.5,
+    age_classes == "75 and older" ~ 80,
+    TRUE ~ NA_real_
+  )) %>%
+  # Remove the "total" row, as it interferes with average calculations and dummy variables
+  filter(age_classes != "total")
+
+# Calculate average age (16+), dummy variables, and total number of persons per parcel
+par_inhabitants_summary_extended <- par_inhabitants_sum_long %>%
+  group_by(id_par_merge) %>%
+  summarise(
+    # Calculate the sum of persons for relevant groups
+    persons_16_plus = sum(persons[age_classes %in% c("16 to 18", "19 to 20", "21 to 24", "25 to 29", "30 to 44", "45 to 59", "60 to 64", "65 to 74", "75 and older")], na.rm = TRUE),
+    persons_75_older = sum(persons[age_classes == "75 and older"], na.rm = TRUE),
+    persons_under_16 = sum(persons[age_classes %in% c("0 to 2", "3 to 5", "6 to 9", "10 to 15")], na.rm = TRUE),
+    persons_total_calc = sum(persons, na.rm = TRUE), # Total number of persons from all age groups (excluding the "total" row)
+
+    # Calculate weighted age for the 16+ group
+    weighted_age_16_plus = sum(persons[age_classes %in% c("16 to 18", "19 to 20", "21 to 24", "25 to 29", "30 to 44", "45 to 59", "60 to 64", "65 to 74", "75 and older")] *
+                                 age_mean[age_classes %in% c("16 to 18", "19 to 20", "21 to 24", "25 to 29", "30 to 44", "45 to 59", "60 to 64", "65 to 74", "75 and older")], na.rm = TRUE),
+
+    # Average age of the 16+ group (NA if no persons 16+ are present)
+    ave_age_par = if_else(persons_16_plus > 0, weighted_age_16_plus / persons_16_plus, NA_real_),
+
+    # Dummy variable: parcel contains ONLY persons 75 and older
+    only_75_older_par = if_else(persons_75_older > 0 & persons_75_older == persons_total_calc, 1, 0),
+
+    # Dummy variable: parcel contains children/young people under 16
+    under_16_present_par = if_else(persons_under_16 > 0, 1, 0)
+  ) %>%
+  # Select the desired columns, including total number of persons
+  select(id_par_merge,
+         persons_total_par = persons_total_calc, # Here the variable is added and renamed
+         ave_age_par,
+         only_75_older_par,
+         under_16_present_par) %>% 
+  mutate(exclude_age = if_else(is.na(ave_age_par), "exclude", NA))
+```
+
+### Final dataset inhabitants
+- Contains some NA for ave_age_par if only persons under 16 are present -> We created a column with exclude_age which can be use late to filter these cases. 
+- By joining the data back to the whole dataset, we have more NA as the input dataset contains only parcels with inhabitant. Thus, for all other parcels we set the NA to 0. 
+
+```{r, include=FALSE}
+par_inhabitants_fin <- parcels_raw %>% 
+  left_join(par_inhabitants_summary_extended, by = c("id_par_merge")) %>% 
+  mutate(persons_total_par = if_else(is.na(persons_total_par), 0, persons_total_par),
+         ave_age_par = if_else(is.na(ave_age_par), 0, ave_age_par),
+         only_75_older_par = if_else(is.na(only_75_older_par), 0, only_75_older_par),
+         under_16_present_par = if_else(is.na(under_16_present_par), 0, under_16_present_par))
+```
+
+## Combine all datasets
+
+```{r, include=FALSE}
+parcels_fin <- par_inhabitants_fin %>% 
+  st_drop_geometry() %>% 
+  left_join(parcels_largest_nbu) %>% 
+  left_join(parcels_geom) 
+
+summary(parcels_fin)
+```
+
+## Output
+
+```{r, include=FALSE}
+st_write(parcels_fin, "./data_prep_output/parcels_predictors_03.gpkg", delete_layer = TRUE)
+```
+
+```{r end-time, echo=FALSE}
+end_time <- Sys.time()
+duration <- end_time - start_time
+message("⏱️ Knitting completed in ", round(duration, 2), " ", attr(duration, "units"))
+```
+
+
+
+

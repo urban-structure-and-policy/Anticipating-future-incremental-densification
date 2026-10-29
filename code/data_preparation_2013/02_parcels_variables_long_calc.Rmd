@@ -1,0 +1,124 @@
+---
+title: "Calculate largest non-built-up area"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r, include=FALSE}
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(sf)
+library(lwgeom)
+library(ggplot2)
+```
+
+```{r setup, include=FALSE}
+my_wd_all_dat <- "project_dir"
+
+knitr::opts_knit$set(root.dir = normalizePath(my_wd_all_dat))
+```
+
+```{r start time, include=FALSE}
+start_time <- Sys.time()
+```
+
+## Calculate largest non-built-up area
+Calculates the largest non-built-up area of a parcel. 
+
+## Input data
+- Pre-processed parcel dataset of 2013
+- Pre-processed building datasets 2013
+- Polygon dataset which separates the city of Munich in 4 parts without overlaps (needed to reduce calculation time)
+
+```{r, include=FALSE}
+parcels_raw <- st_read("./data_prep_output/parcels_03_merged_2013_2011.gpkg")
+bldg_13_raw <- st_read("./data_prep_output/bldg_2013_04_cleaned_2010.gpkg")
+subset_4parts <- st_read("./data_input/polygon_subset_4parts.gpkg")
+```
+
+## Data processing
+The parcel and building datasets are split into four parts to speed up calculation time. If we run all of Munich at once, the script calculates for about 2 hours. If we split it in 4 parts it is much faster.
+
+```{r, include=FALSE}
+parcels_NW <- st_filter(parcels_raw, subset_4parts %>% filter(part == "NW"), .predicate = st_within)
+bldg_13_NW <- st_filter(bldg_13_raw, subset_4parts %>% filter(part == "NW"), .predicate = st_within)
+
+parcels_SW <- st_filter(parcels_raw, subset_4parts %>% filter(part == "SW"), .predicate = st_within)
+bldg_13_SW <- st_filter(bldg_13_raw, subset_4parts %>% filter(part == "SW"), .predicate = st_within)
+
+parcels_N <- st_filter(parcels_raw, subset_4parts %>% filter(part == "N"), .predicate = st_within)
+bldg_13_N <- st_filter(bldg_13_raw, subset_4parts %>% filter(part == "N"), .predicate = st_within)
+
+parcels_E <- st_filter(parcels_raw, subset_4parts %>% filter(part == "E"), .predicate = st_within)
+bldg_13_E <- st_filter(bldg_13_raw, subset_4parts %>% filter(part == "E"), .predicate = st_within)
+```
+
+To calculate the variable, we create a buffer of 5 m around the buildings, which is a ruff approximation for clearances defined by law (Abstandsflächen). We then substract the building polygons from the parcel polygons. The resulting polygons are buffered by -5 m and then by +5 m to keep only core areas, which are at least 5 m wide and thus theoretically allow for the construction of a new building. 
+
+```{r, include=FALSE}
+# Define function 
+calculate_largest_nonbuiltup <- function(bldg_data, parcel_data) {
+  
+  # Buffer buildings by 5m
+  bldg_buffered <- st_buffer(
+    bldg_data,
+    dist = 5,
+    endCapStyle = "SQUARE",
+    joinStyle = "MITRE"
+  )
+  
+  # Difference between parcels and buffered buildings
+  non_builtup <- st_difference(parcel_data, st_union(bldg_buffered))
+  
+  # Morphological cleaning (buffer -5 then +5)
+  non_builtup_clean <- non_builtup %>%
+    st_buffer(dist = -5,
+              endCapStyle = "SQUARE",
+              joinStyle = "MITRE") %>%
+    st_buffer(dist = 5,
+              endCapStyle = "SQUARE",
+              joinStyle = "MITRE") %>%
+    mutate(largest_nonbuiltup = as.numeric(st_area(.))) %>%
+    filter(largest_nonbuiltup > 0) %>%
+    st_drop_geometry() %>%
+    select(id_par_merge, largest_nonbuiltup)
+  
+  non_builtup_clean 
+}
+```
+
+```{r, include=FALSE}
+non_builtup_clean_NW <- calculate_largest_nonbuiltup(bldg_13_NW, parcels_NW)
+non_builtup_clean_SW <- calculate_largest_nonbuiltup(bldg_13_SW, parcels_SW)
+non_builtup_clean_N <- calculate_largest_nonbuiltup(bldg_13_N, parcels_N)
+non_builtup_clean_E <- calculate_largest_nonbuiltup(bldg_13_E, parcels_E)
+```
+
+### Rejoin the four parts to one dataframe
+We join the parts to one dataset and link it to the original parcel data. NA values are replaced by 0, as this means that for the respective parcel no largest built-up area remains, which equals 0.
+
+```{r, include=FALSE}
+all_largestnonbuiltup <- non_builtup_clean_NW %>% 
+  bind_rows(non_builtup_clean_SW) %>% 
+  bind_rows(non_builtup_clean_N) %>% 
+  bind_rows(non_builtup_clean_E)
+  
+parcels_fin <- parcels_raw %>% 
+  left_join(all_largestnonbuiltup) %>% 
+  mutate(largest_nonbuiltup = if_else(is.na(largest_nonbuiltup), 0, largest_nonbuiltup)) %>% 
+  select(id_par_merge, largest_nonbuiltup)
+```
+
+## Output
+```{r, include=FALSE}
+st_write(parcels_fin, "./data_prep_output/parcels_predictors_02.gpkg", delete_layer = TRUE)
+```
+
+```{r end-time, echo=FALSE}
+end_time <- Sys.time()
+duration <- end_time - start_time
+message("⏱️ Knitting completed in ", round(duration, 2), " ", attr(duration, "units"))
+```
+

@@ -1,0 +1,163 @@
+---
+title: "Add neighbour variables"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r, include=FALSE}
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(sf)
+library(lwgeom)
+library(ggplot2)
+library(sf)
+library(dplyr)
+library(purrr)
+```
+
+```{r setup, include=FALSE}
+my_wd_all_dat <- "project_dir"
+
+knitr::opts_knit$set(root.dir = normalizePath(my_wd_all_dat))
+```
+
+```{r start time, include=FALSE}
+start_time <- Sys.time()
+```
+
+## Add neighbour variables
+We calculate three variables describing deviation from the neighbourhood: 
+- share_area_par_nbr
+- area_foot_bldg_median_nbr
+- share_floorspace_par_nbr
+
+They compare each parcel’s characteristic to the median of its nearby parcels (within 5 meters) in the same building block, producing relative deviation measures for area, footprint, and floorspace.
+
+We calculate one variable describing accessible plot density
+- apd_400m
+ 
+## Input data
+- Pre-processed parcel dataset of 2023
+
+```{r, include=FALSE}
+parcels_input <- st_read("./data_prep_output_2023/parcels_predictors_04_2023.gpkg")
+```
+
+## Data processing
+
+### Deviation from the neighbourhood
+We only consider neighbors which are located in the same building block. 
+- We consider only parcels with at least one building (n_bldg > 0).
+- We splits the dataset into blocks (id_block).
+- Neighborhood analysis within each block:
+  * We find all parcels within 5 m of distance for each parcel.
+  * We collect the neighboring parcels’ values for share_area_par, area_foot_bldg_median, share_floorspace_par.
+  * We compute the median of each variable among neighbors.
+- We calculate relative differences (% deviation) between a parcel’s own value and its neighbors’ median for each variable.
+- We recombine the results – All blocks are merged back together.
+
+```{r, include=FALSE}
+# Spaltennamen definieren
+id_block <- "id_block"
+id_par_merge <- "id_par_merge"
+var1 <- "share_area_foot_par"
+var2 <- "area_foot_bldg_median"
+var3 <- "share_floorspace_par"
+```
+
+```{r, include=FALSE}
+# Calculate neighborhood variables
+# Filter non-built-up parcels
+parcels_variables <- parcels_input %>% filter(n_bldg > 0)
+
+# Split parcels by block
+parcels_split <- parcels_variables %>% group_split(!!sym(id_block))
+
+# Perform calculations per block
+parcels_with_stats <- map(parcels_split, function(group) {
+  neighbor_indices <- st_is_within_distance(group, dist = 5)
+  
+  group <- group %>% mutate(
+    neighbors_ids = map(neighbor_indices, ~ .data[[id_par_merge]][.x]),
+    var1_neighbors = map(neighbor_indices, ~ .data[[var1]][.x]),
+    var2_neighbors = map(neighbor_indices, ~ .data[[var2]][.x]),
+    var3_neighbors = map(neighbor_indices, ~ .data[[var3]][.x]),
+    
+    var1_median = map_dbl(var1_neighbors, ~ median(.x, na.rm = TRUE)),
+    var2_median = map_dbl(var2_neighbors, ~ median(.x, na.rm = TRUE)),
+    var3_median = map_dbl(var3_neighbors, ~ median(.x, na.rm = TRUE)),
+    
+    share_area_par_nbr = 100 * (.data[[var1]] - var1_median) / var1_median,
+    area_foot_bldg_median_nbr = 100 * (.data[[var2]] - var2_median) / var2_median,
+    share_floorspace_par_nbr = 100 * (.data[[var3]] - var3_median) / var3_median
+  )
+  return(group)
+})
+
+# Recombine and filter variables
+parcels_nbr <- bind_rows(parcels_with_stats) %>% 
+  select(id_par_merge, share_area_par_nbr, area_foot_bldg_median_nbr, share_floorspace_par_nbr) %>% 
+  st_drop_geometry()
+```
+
+### Accessible plot density (Tümtürk et al. 2025)
+This variable is calculated as the number of parcels which can be reached within a 400 m buffer. 
+
+```{r, include=FALSE}
+# Filter undeveloped parcels
+centroid <- st_centroid(parcels_input) %>% 
+  select(id_par_merge)
+
+buffer_400 <- st_buffer(centroid, 400)
+intersect_buffer <- st_join(buffer_400, parcels_input %>% transmute(id_par_merge_400m = id_par_merge))
+
+access_plot_dens <- intersect_buffer %>% st_drop_geometry() %>% 
+  group_by(id_par_merge) %>% 
+  summarise(apd_400m = n())
+```
+
+## Add further neighbourhood variables on block level
+
+```{r further neighbourhood var, include=FALSE}
+block_var_age <- parcels_input %>% 
+  st_drop_geometry() %>% 
+  filter(ave_age_par != 0) %>% 
+  group_by(id_block) %>% 
+  summarise(age_pop_mean_block = mean(ave_age_par, na.rm = TRUE)) 
+
+block_var <- parcels_input %>% 
+  st_drop_geometry() %>% 
+  group_by(id_block) %>% 
+  summarise(fa_23 = sum(fa_23), 
+            area_par = sum(area_par), 
+            bldg_age_median_block = median(bldg_age_median, na.rm = TRUE)) %>% 
+  mutate(share_floorspace_par_block = fa_23 / area_par) %>% 
+  select(-fa_23, -area_par)
+```
+
+## Join back to original data
+
+```{r, include=FALSE}
+parcels_nbr_fin <- parcels_input %>% 
+  left_join(parcels_nbr) %>% 
+  left_join(access_plot_dens) %>% 
+  left_join(block_var_age) %>% 
+  left_join(block_var) %>% 
+  mutate(age_pop_mean_block = if_else(is.na(age_pop_mean_block), 0, age_pop_mean_block))
+```
+
+## Output
+
+```{r, include=FALSE}
+st_write(parcels_nbr_fin, "./data_prep_output_2023/parcels_predictors_05_2023.gpkg", delete_layer = TRUE)
+```
+
+```{r end-time, echo=FALSE}
+end_time <- Sys.time()
+duration <- end_time - start_time
+message("Knitting completed in ", round(duration, 2), " ", attr(duration, "units"))
+```
+
+

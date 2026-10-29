@@ -1,0 +1,180 @@
+---
+title: "Tables observed densification and results base scenario"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+  word_document: default
+  pdf_document:
+    toc: true
+---
+
+```{r, include=FALSE}
+library(readr)
+library(sf)
+library(flextable)
+library(officer)
+library(tidyverse)
+library(kableExtra)
+library(scales)
+library(ggplot2)
+library(ggspatial)
+```
+
+```{r setup, include=FALSE}
+my_wd_all_dat <- "project_dir"
+
+knitr::opts_knit$set(root.dir = normalizePath(my_wd_all_dat))
+```
+
+```{r, include=FALSE}
+# Data observed densification
+data_raw <- st_read("./data_prep_output/parcels_predictors_05_final.gpkg")
+
+# Data prediction
+pred_fin_parcel <- st_read("./data_model_and_prediction_pipeline/scenarios_parcellevel_all_parceltypes.gpkg")
+```
+
+## 1) Table observed densification
+This is the number of parcels in the final dataset by structure type:
+
+```{r, echo=FALSE, warning=FALSE}
+table_all_13 <- 
+  data_raw %>% 
+  st_drop_geometry() %>% 
+  group_by(dep_dens) %>% 
+    summarise(n_par = n(),
+              dif_fa_sum = sum(dif_fa),
+              fa_13_sum = sum(fa_13)) %>% 
+  pivot_wider(names_from = dep_dens, values_from = n_par:fa_13_sum) %>% 
+  mutate(n_par_total = n_par_densification + n_par_nochange, 
+         n_perc_dens = round(n_par_densification / n_par_total*100, 1),
+         fa_13_total = fa_13_sum_densification + fa_13_sum_nochange, 
+         dif_fa_perc_dens = round(dif_fa_sum_densification / fa_13_total*100, 1),
+         dif_fa_per_par = round(dif_fa_sum_densification/n_par_densification, 0),
+         parceltype = "all") 
+
+table_parceltype_13 <- 
+  data_raw %>% 
+  st_drop_geometry() %>% 
+  group_by(parceltype, dep_dens) %>% 
+    summarise(n_par = n(),
+              dif_fa_sum = round(sum(dif_fa), 0),
+              fa_13_sum = sum(fa_13)) %>% 
+  pivot_wider(names_from = dep_dens, values_from = n_par:fa_13_sum) %>% 
+  mutate(n_par_total = n_par_densification + n_par_nochange, 
+         n_perc_dens = round(n_par_densification / n_par_total*100, 1),
+         fa_13_total = fa_13_sum_densification + fa_13_sum_nochange, 
+         dif_fa_perc_dens = round(dif_fa_sum_densification / fa_13_total*100, 1),
+         dif_fa_per_par = round(dif_fa_sum_densification/n_par_densification, 0)) %>% 
+  bind_rows(table_all_13)
+
+table_parceltype_13$parceltype <- ordered(table_parceltype_13$parceltype, 
+                                       levels = c("bu_res_sfh", "bu_res_mfh", "bu_nonres", "nbu", "all"))
+
+kable(table_parceltype_13 %>% 
+        arrange(parceltype) %>% 
+        select(parceltype, n_par_total, n_par_densification, n_perc_dens, dif_fa_sum_densification,  dif_fa_perc_dens, dif_fa_per_par), 
+      format.args = list(decimal.mark = '.', big.mark = ","))
+```
+
+```{r}
+out_path <- "./output_maps/table_odd_2013.docx"
+
+if (file.exists(out_path)) {
+  file.remove(out_path)
+}
+
+tb <- table_parceltype_13 %>% 
+                               arrange(parceltype) %>% 
+                       select(parceltype, n_par_total, n_par_densification, n_perc_dens, dif_fa_sum_densification,  dif_fa_perc_dens, dif_fa_per_par)
+
+ft <- flextable(tb)
+
+ft <- ft %>%
+  font(fontname = "Calibri", part = "all") %>%
+  fontsize(size = 9, part = "all") %>%
+  width(width = 16 / ncol(tb), unit = "cm") %>%   # distribute total width across columns
+  set_table_properties(layout = "fixed")
+
+doc <- read_docx() %>%
+  body_add_flextable(ft)
+
+print(doc, target = out_path)
+```
+
+## 2) Table prediction results densification
+
+```{r, echo=FALSE, warning=FALSE}
+
+table_all <- 
+  pred_fin_parcel %>% 
+  st_drop_geometry() %>% 
+  mutate(bs_scenario = if_else(is.na(bs_scenario), "nochange", "densification")) %>% 
+  group_by(bs_scenario) %>% 
+    summarise(n_par = n(),
+              dif_fa_sum = round(sum(dif_fa_absolut_predicted), 0),
+              fa_23_sum = sum(fa_23)) %>% 
+  pivot_wider(names_from = bs_scenario, values_from = n_par:fa_23_sum) %>% 
+  mutate(n_par_total = n_par_densification + n_par_nochange, 
+         n_perc_dens = round(n_par_densification / n_par_total*100, 1),
+         fa_23_total = fa_23_sum_densification + fa_23_sum_nochange, 
+         dif_fa_perc_dens = round(dif_fa_sum_densification / fa_23_total*100, 1),
+         dif_fa_per_par = round(dif_fa_sum_densification/n_par_densification, 0))
+
+table_parceltype <- 
+  pred_fin_parcel %>% 
+  st_drop_geometry() %>% 
+  mutate(bs_scenario = if_else(is.na(bs_scenario), "nochange", "densification")) %>% 
+  group_by(parceltype, bs_scenario) %>% 
+    summarise(n_par = n(),
+              dif_fa_sum = round(sum(dif_fa_absolut_predicted), 0),
+              fa_23_sum = sum(fa_23)) %>% 
+  pivot_wider(names_from = bs_scenario, values_from = n_par:fa_23_sum) %>% 
+  mutate(n_par_total = n_par_densification + n_par_nochange, 
+         n_perc_dens = round(n_par_densification / n_par_total*100, 1),
+         fa_23_total = fa_23_sum_densification + fa_23_sum_nochange, 
+         dif_fa_perc_dens = round(dif_fa_sum_densification / fa_23_total*100, 1),
+         dif_fa_per_par = round(dif_fa_sum_densification/n_par_densification, 0)) %>% 
+  bind_rows(table_all)
+
+table_parceltype$parceltype <- ordered(table_parceltype$parceltype, 
+                                       levels = c("bu_res_sfh", "bu_res_mfh", "bu_nonres", "nbu", "all"))
+
+kable(table_parceltype %>% 
+                arrange(parceltype) %>% 
+        select(parceltype, n_par_total, n_par_densification, n_perc_dens, 
+               dif_fa_sum_densification,  
+               dif_fa_perc_dens, 
+               dif_fa_per_par), 
+      format.args = list(decimal.mark = '.', big.mark = ","))
+```
+
+```{r}
+out_path <- "./output_maps/table_prediction_odd_2023.docx"
+
+if (file.exists(out_path)) {
+  file.remove(out_path)
+}
+
+tb_pred <- table_parceltype %>% 
+                       arrange(parceltype) %>% 
+                       select(parceltype, n_par_total, n_par_densification, n_perc_dens, 
+                              dif_fa_sum_densification, 
+                              dif_fa_perc_dens,
+                              dif_fa_per_par)
+
+ft_pred <- flextable(tb_pred)
+
+ft_pred <- ft_pred %>%
+  font(fontname = "Calibri", part = "all") %>%
+  fontsize(size = 9, part = "all") %>%
+  width(width = 16 / ncol(tb_pred), unit = "cm") %>%   # distribute total width across columns
+  set_table_properties(layout = "fixed")
+
+doc <- read_docx() %>%
+  body_add_flextable(ft_pred)
+
+print(doc, target = out_path)
+```

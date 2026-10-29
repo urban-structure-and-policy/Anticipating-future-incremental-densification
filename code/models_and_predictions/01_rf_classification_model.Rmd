@@ -1,0 +1,515 @@
+---
+title: "Random Forest classification model"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+  word_document: default
+  pdf_document:
+    toc: true
+params:
+  run_id: "default"
+---
+
+```{r, include=FALSE}
+library(readr)
+library(sf)
+library(tidymodels)
+library(ranger)
+library(dplyr)
+library(spatialsample)
+library(waywiser)
+library(vip)
+library(themis)
+library(yardstick)
+library(important)
+library(filtro)
+library(fastshap) 
+library(workflows)
+library(tidyr)
+library(purrr)
+library(ggplot2)
+library(stringr)
+```
+
+```{r setup, include=FALSE}
+my_wd_all_dat <- "project_dir"
+
+knitr::opts_knit$set(root.dir = normalizePath(my_wd_all_dat))
+```
+
+```{r, include=FALSE}
+data_raw <- st_read("./data_prep_output/parcels_predictors_05_final.gpkg")
+```
+
+## Define model of interest
+
+```{r, echo=FALSE}
+# runs via 00_run_all
+cat("Selected model:", selected_model)
+```
+
+```{r echo=FALSE}
+dat <- data_raw %>%
+  filter(parceltype == selected_model)
+```
+
+## Data perparation
+
+```{r, include=FALSE}
+## Preprocessing
+# Convert categorical variables to factors
+dat$dep_dens <- as.factor(dat$dep_dens)
+summary(dat$dep_dens)
+
+# remove variables which are not needed in the model
+base_drop <- c(
+  "dep_dens_cat", "dif_fa", "dif_fa_perc", "dep_fa_23", "parceltype", "service_quality_chg", "service_quality_2020", "center_quality"
+)
+
+nbu_extra_drop <- c(
+  "dep_dens_cat", "dif_fa", "dif_fa_perc", "dep_fa_23", "parceltype",
+  "share_area_foot_par", "share_floorspace_par", "largest_nonbuiltup", "fa_13",
+  "bldg_flats_sum", "ucp_par", "bldg_age_median", "par_renov_recon", "bldg_type",
+  "persons_total_par", "persons_per_fa", "ave_age_par", "only_75_older_par",
+  "under_16_present_par", "share_area_par_nbr", "share_floorspace_par_nbr"
+)
+
+drop_cols <- if (params$run_id == "nbu") {
+  nbu_extra_drop
+} else {
+  base_drop
+}
+
+data_reg <- dat %>%
+  dplyr::select(-dplyr::any_of(drop_cols)) %>%
+  mutate(across(where(is.character), as.factor)) %>%
+  mutate(across(where(is.logical), as.factor))
+
+
+# Check for missing values
+sum(is.na(data_reg))
+
+# Remove rows with missing values (if necessary)
+data <- na.omit(data_reg)
+```
+
+## Preparations for tidymodel
+
+```{r}
+trainDat <- data
+
+predictor_names <- trainDat %>% 
+  st_drop_geometry() %>% 
+  select(id_par_merge, area_par:bezirksteil) %>% # id can be kept, as later on we define it as ID in the recipe
+  names()
+
+predictor_names
+
+response_name <- "dep_dens"
+```
+
+### Define recipe including balancing of training data and tunable feature selection
+
+```{r define-recipe}
+formula <- as.formula(paste(
+  response_name,
+  "~",
+  paste(predictor_names, collapse = " + ")
+))
+
+recipe <- recipes::recipe(formula, data = trainDat) %>% 
+  update_role(id_par_merge, new_role = "ID") %>%
+  update_role(bezirksteil, new_role = "ID") %>%
+  update_role(bezirk, new_role = "ID") %>%
+  step_downsample(dep_dens, under_ratio = 1) %>% 
+  important::step_predictor_best(
+    all_predictors(),
+    score      = "imp_rf",
+    prop_terms = tune(),
+    id         = "feat_sel"
+  )
+
+recipe
+```
+
+### Define model
+
+```{r define-model-spec}
+rf_model <- parsnip::rand_forest(mode = "classification") %>% 
+  set_engine("ranger", importance = "impurity")
+```
+
+### Create workflow
+
+```{r create-workflow}
+workflow <- workflows::workflow() %>% 
+  workflows::add_recipe(recipe) %>% 
+  workflows::add_model(rf_model)
+workflow
+```
+
+### Define spatial cross validation
+
+```{r define-cv}
+set.seed(123)
+block_folds <- spatialsample::spatial_block_cv(data, v = 4, n = 2)
+
+spatialsample::autoplot(block_folds)
+
+# control cross-validation
+keep_pred <- tune::control_resamples(save_pred = TRUE, save_workflow = TRUE)
+```
+
+### Define tuning grid for feature selection
+
+```{r tuning-grid}
+prop_grid <- tibble::tibble(
+    prop_terms = seq(0.5, 1.0, by = 0.1)  
+)
+prop_grid
+```
+
+### Tune model with spatial cross-validation
+
+```{r tune-model}
+set.seed(123)
+
+rf_tuned <- tune::tune_grid(
+  workflow,
+  resamples = block_folds,
+  grid      = prop_grid,
+  control   = keep_pred
+)
+
+rf_tuned
+```
+
+#### ROC-AUC across tuning parameter values
+
+```{r roc-metrics}
+metrics_all <- tune::collect_metrics(rf_tuned)
+
+metrics_roc <- metrics_all %>% 
+  dplyr::filter(.metric == "roc_auc") %>% 
+  dplyr::arrange(dplyr::desc(mean))
+
+metrics_roc
+```
+
+```{r roc-metrics-table, results='asis'}
+knitr::kable(
+  metrics_roc,
+  caption = "ROC-AUC across different values of prop_terms (feature selection fraction).",
+  digits = 3
+)
+```
+
+```{r roc-metrics-plot, fig.width=6, fig.height=4}
+ggplot(metrics_roc, aes(x = prop_terms, y = mean)) +
+  geom_line() +
+  geom_point() +
+  geom_errorbar(aes(ymin = mean - std_err, ymax = mean + std_err), width = 0.02) +
+  labs(
+    x = "Fraction of Predictors Kept (prop_terms)",
+    y = "Mean ROC-AUC",
+    title = "ROC-AUC vs. Feature Selection Fraction",
+    subtitle = "Error bars show +/- 1 standard error"
+  ) +
+  theme_minimal()
+```
+
+#### Overall ROC-AUC and other metrics
+
+```{r collect-metrics}
+metrics_all
+```
+
+```{r fold-metrics}
+rf_tuned$.metrics  # metrics from each fold (list-column)
+```
+
+### Model performance
+
+#### Confusion matrix for best tuned configuration
+
+```{r conf-matrix}
+## Select best prop_terms by ROC AUC
+best_prop <- tune::select_best(rf_tuned, metric = "roc_auc")
+best_prop
+
+## Predictions for the best tuning configuration
+preds <- tune::collect_predictions(rf_tuned, parameters = best_prop)
+preds
+conf_matrix <- yardstick::conf_mat(preds, dep_dens, .pred_class)
+conf_matrix
+```
+
+#### Performance for top-ranked parcels matching projection procedure
+
+```{r top-ranked-performance}
+
+## Historical densification share used for the baseline projection
+projection_share <- mean(
+  dat$dep_dens == "densification",
+  na.rm = TRUE
+)
+
+cat(
+  "Projection share:",
+  round(projection_share * 100, 2),
+  "%\n"
+)
+
+
+## Identify spatial CV fold/repetition columns
+fold_cols <- intersect(
+  c("id", "id2"),
+  names(preds)
+)
+
+
+## Calculate precision among the top-ranked parcels
+## separately for each spatial CV assessment fold
+
+precision_at_share <- preds %>%
+  group_by(across(all_of(fold_cols))) %>%
+  group_modify(~ {
+
+    ## Number of parcels in the assessment fold
+    n_total <- nrow(.x)
+
+    ## Number of parcels to select according to the
+    ## historical densification share
+    n_select <- round(n_total * projection_share)
+    n_select <- max(1, n_select)
+
+    ## Rank ALL parcels by predicted probability and
+    ## select the top-ranked proportion
+    selected <- .x %>%
+      arrange(desc(.pred_densification)) %>%
+      slice_head(n = n_select)
+
+    ## True positives:
+    ## selected parcels that actually densified
+    tp <- sum(
+      selected$dep_dens == "densification",
+      na.rm = TRUE
+    )
+
+    ## False positives:
+    ## selected parcels that did not densify
+    fp <- sum(
+      selected$dep_dens != "densification",
+      na.rm = TRUE
+    )
+
+    ## Precision = TP / (TP + FP)
+    precision <- tp / (tp + fp)
+
+    tibble(
+      n_total = n_total,
+      n_selected = n_select,
+      TP = tp,
+      FP = fp,
+      precision_at_share = precision
+    )
+  }) %>%
+  ungroup()
+
+
+precision_at_share
+
+```
+
+```{r precision-at-projection-share-summary}
+
+## Mean and standard deviation across spatial CV folds/repetitions
+
+precision_at_share_summary <- precision_at_share %>%
+  summarise(
+    projection_share = projection_share,
+
+    precision_at_share_mean = mean(
+      precision_at_share,
+      na.rm = TRUE
+    ),
+
+    precision_at_share_sd = sd(
+      precision_at_share,
+      na.rm = TRUE
+    )
+  )
+
+
+precision_at_share_summary
+
+```
+
+
+#### ROC-AUC based on preds
+
+```{r}
+roc_best <- yardstick::roc_auc(
+  preds,
+  truth = dep_dens,
+  .pred_densification
+)
+
+roc <- roc_best$.estimate
+```
+
+#### Precision, Recall, F1, Balanced Accuracy
+
+```{r prf1-bacc, echo=FALSE}
+tp <- conf_matrix$table[1, 1]
+fp <- conf_matrix$table[1, 2]
+fn <- conf_matrix$table[2, 1]
+tn <- conf_matrix$table[2, 2]
+
+# Precision
+precision <- tp / (tp + fp)
+
+# Recall (Sensitivity)
+recall <- tp / (tp + fn)
+
+# F1 Score
+f1 <- 2 * precision * recall / (precision + recall)
+
+# Balanced Accuracy
+BAcc <- 0.5 * (tp / (tp + fn) + tn / (tn + fp))
+
+# Print results
+cat("Precision:", round(precision, 2), "\n")
+cat("Recall:", round(recall, 2), "\n")
+cat("F1 Score:", round(f1, 2), "\n")
+cat("Balanced Accuracy:", round(BAcc, 2), "\n")
+cat("ROC-AUC:", round(roc, 2), "\n")
+cat("Precision at projection share:",  round(precision_at_share_summary$precision_at_share_mean, 3),
+  "+/-", round(precision_at_share_summary$precision_at_share_sd, 3), "\n")
+
+# save in dataframe
+results_df <- data.frame(
+  Model = selected_model,
+  Balanced_Accuracy = BAcc,
+  Precision = precision,
+  Recall = recall,
+  F1_Score = f1,
+  ROC_AUC = roc,
+
+  Projection_Share = projection_share,
+
+  Precision_at_Projection_Share =
+    precision_at_share_summary$precision_at_share_mean,
+
+  Precision_at_Projection_Share_SD =
+    precision_at_share_summary$precision_at_share_sd
+)
+```
+
+### Fit final model with tuned feature selection
+
+```{r fit-final-model}
+## Finalize workflow with best prop_terms
+final_wf <- finalize_workflow(workflow, best_prop)
+
+set.seed(123)
+
+rf_final <- final_wf %>%
+  fit(data = trainDat)
+
+rf_final
+```
+
+#### Feature importance for final model
+
+```{r feature-importance}
+imp <- extract_fit_parsnip(rf_final) %>%
+  vip::vip(num_features = 50)
+imp
+
+var_imp <- imp[["data"]]
+```
+
+#### Extract predictors finally used
+
+```{r}
+predictors_used <- var_imp %>% 
+  select(-Importance)
+
+predictors_used
+```
+
+## SHAP / Shapley values
+
+### 1) Get exact data used by the workflow
+
+```{r}
+set.seed(123)
+
+mold <- workflows::extract_mold(rf_final)
+X_all <- as.data.frame(mold$predictors)
+y_all <- mold$outcomes[[1]]
+
+# Engine model
+rf_fit <- workflows::extract_fit_engine(rf_final)
+
+# Prediction wrapper (probability of positive class)
+pos_class <- "densification"
+pred_fun <- function(object, newdata) {
+  p <- predict(object, data = newdata, type = "response")$predictions
+  as.numeric(p[, pos_class])
+}
+```
+
+### 2) Stratified sample of rows to EXPLAIN
+
+```{r}
+n_explain <- 4000
+
+idx_by_class <- split(seq_len(nrow(X_all)), y_all)
+k <- length(idx_by_class)
+n_per_class <- ceiling(n_explain / k)
+
+idx_explain <- unlist(lapply(idx_by_class, function(idx) {
+  sample(idx, size = min(length(idx), n_per_class), replace = FALSE)
+}), use.names = FALSE)
+
+# trim to exactly n_explain if needed
+if (length(idx_explain) > n_explain) idx_explain <- sample(idx_explain, n_explain)
+
+X_explain <- X_all[idx_explain, , drop = FALSE]
+```
+
+### 3) Compute SHAP on subset
+
+```{r}
+set.seed(123)
+shap_mat <- fastshap::explain(
+  object       = rf_fit,
+  X            = X_explain,
+  pred_wrapper = pred_fun,
+  nsim         = 100,
+  adjust       = TRUE
+)
+
+dim(shap_mat)
+```
+
+## Save output
+
+```{r}
+# variable importance 
+write_rds(var_imp, paste0("./data_model_and_prediction_pipeline/m1_table_varimp_", selected_model, ".rds"))
+# predictors used 
+write_rds(predictors_used, paste0("./data_model_and_prediction_pipeline/m1_predictors_used_", selected_model, ".rds"))
+# RF model
+write_rds(rf_final, paste0("./data_model_and_prediction_pipeline/m1_rf_model_", selected_model, ".rds"))
+# Model performance
+write_rds(results_df, paste0("./data_model_and_prediction_pipeline/m1_model_performance_", selected_model, ".rds"))
+# SHAP matrix
+write_rds(shap_mat, paste0("./data_model_and_prediction_pipeline/m1_shap_matrix_", selected_model, ".rds"))
+# SHAP X data frame
+write_rds(X_explain, paste0("./data_model_and_prediction_pipeline/m1_shap_x_dataframe_", selected_model, ".rds"))
+```
